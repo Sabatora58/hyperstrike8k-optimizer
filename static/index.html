@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HYPERSTRIKE 8K — Local AI Optimizer</title>
+<style>
+  :root{--bg:#0A0D12;--panel:#10151D;--line:#1E2733;--ink:#D7E1EC;--dim:#6B7A8C;
+        --accent:#FFB454;--cyan:#4FD8EB;--green:#5CE6A1;--red:#FF5C5C;}
+  *{box-sizing:border-box;margin:0}
+  body{background:var(--bg);color:var(--ink);font:13px/1.6 'JetBrains Mono','SFMono-Regular',Consolas,monospace;padding-bottom:60px}
+  header{border-bottom:1px solid var(--line);padding:18px 22px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+  .brand{font-size:17px;letter-spacing:.18em;font-weight:700;color:var(--accent)}
+  .sub{color:var(--dim);font-size:11px;letter-spacing:.1em}
+  .wrap{max-width:1020px;margin:0 auto;padding:20px 22px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px;margin-bottom:16px}
+  h2{font-size:11px;letter-spacing:.2em;color:var(--cyan);margin-bottom:14px;text-transform:uppercase;font-weight:400}
+  .cat{color:var(--accent);font-size:11px;letter-spacing:.12em;margin:14px 0 8px}
+  .row{display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+  .row label{width:230px;color:var(--dim);font-size:12px}
+  input,select{background:#0C1017;border:1px solid var(--line);color:var(--ink);border-radius:4px;padding:6px 8px;width:130px;font:inherit}
+  button{background:var(--accent);color:#14100A;border:1px solid var(--accent);border-radius:4px;padding:10px 18px;font:inherit;font-weight:700;letter-spacing:.08em;cursor:pointer}
+  button.ghost{background:transparent;color:var(--ink);border-color:var(--line);font-weight:400}
+  button.armed{background:var(--green);border-color:var(--green)}
+  canvas{width:100%;height:120px;display:block;border-radius:4px;background:#0C1017}
+  .stat{display:inline-block;margin:0 22px 6px 0}
+  .stat b{display:block;font-size:20px;color:var(--accent);font-weight:400}
+  .stat span{font-size:10px;color:var(--dim);letter-spacing:.1em}
+  .grid{display:grid;gap:8px}
+  .cell{background:#0C1017;border:1px solid var(--line);border-radius:4px;padding:8px}
+  .cell .t{color:var(--accent);font-size:11px;margin-bottom:4px}
+  .cell input{width:64px;padding:4px 6px}
+  .diff{color:var(--green);font-weight:700}
+  .reason{margin-bottom:8px}
+  .warn{color:var(--accent);font-size:12px;margin-top:12px}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="brand">HYPERSTRIKE 8K // LOCAL AI OPTIMIZER</div>
+    <div class="sub">APEX LEGENDS — 完全ローカル解析
+      <span style="color:var(--green)">UI v3.5 / 公開向けセキュリティ対応</span></div>
+  </div>
+  <div style="text-align:right">
+    <div id="gpu" style="color:var(--dim);font-size:11px">推論プロバイダ確認中…</div>
+    <button id="btnQuit" class="ghost" style="padding:4px 10px;font-size:11px;margin-top:6px">アプリを終了</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <!-- ============ 01 設定入力 ============ -->
+  <div class="panel">
+    <h2>01 — 現在のHyperStrike Hub設定を入力</h2>
+
+    <div class="cat">プロファイル読込 / 書出</div>
+    <div class="row">
+      <label>プロファイルJSON</label>
+      <input type="file" id="profileFile" accept=".json,application/json" style="width:280px">
+      <button id="btnPaste" class="ghost" style="padding:6px 12px">貼り付けから読込</button>
+      <button id="btnExport" class="ghost" style="padding:6px 12px">現在の入力を書出</button>
+      <button id="btnResetDefaults" class="ghost" style="padding:6px 12px;border-color:var(--red);color:var(--red)">デフォルトに戻す</button>
+    </div>
+    <div id="pasteWrap" style="display:none;margin-bottom:8px">
+      <textarea id="pasteArea" placeholder='ここにJSONを貼り付けて「読込実行」'
+        style="width:100%;height:110px;background:#0C1017;border:1px solid var(--line);color:var(--ink);border-radius:4px;padding:8px;font:inherit"></textarea>
+      <button id="btnPasteApply" style="margin-top:6px;padding:6px 12px">読込実行</button>
+    </div>
+    <p id="importMsg" style="font-size:11px;margin-bottom:4px"></p>
+    <div id="importDetail" style="display:none;font-size:11px;color:var(--dim);max-height:140px;overflow:auto;border:1px solid var(--line);border-radius:4px;padding:6px;margin-bottom:8px"></div>
+
+    <div class="cat">チューニング（グローバル）</div>
+    <div class="row"><label>ポーリングレート [Hz]</label><select id="pollingRate"></select></div>
+    <div class="row"><label>レポート頻度 [Hz]</label><select id="reportRate"></select></div>
+    <div class="row"><label>スティックサンプリング</label><select id="stickSampling"></select></div>
+    <div class="row"><label>スティック量子化 (X360)</label><select id="quantization"></select></div>
+    <div class="row"><label>高度サンプリングレベル</label><select id="advSampling"></select></div>
+
+    <div class="cat">APEXゲーム内設定</div>
+    <div class="row"><label>視点感度 (1-8)</label><select id="apex_lookSens"></select></div>
+    <div class="row"><label>ADS感度 (1-8)</label><select id="apex_adsSens"></select></div>
+    <div class="row"><label>使用武器（リコイル補正）</label><select id="apex_weapon"></select></div>
+    <div class="row"><label>バレルスタビライザー</label><select id="apex_barrel"></select></div>
+    <div class="row"><label>詳細スコープ感度</label><select id="apex_perOptic"><option>オフ</option><option>オン</option></select></div>
+    <div id="apex_opticsWrap" style="display:none">
+      <div class="cat">スコープ別倍率</div>
+      <div id="apex_opticsGrid" class="grid" style="grid-template-columns:repeat(7,1fr)"></div>
+    </div>
+
+    <div class="cat">右スティック（エイム）</div>
+    <div id="rsFields"></div>
+    <div class="cat">左スティック（移動）</div>
+    <div id="lsFields"></div>
+  </div>
+
+  <!-- ============ 02 計測 ============ -->
+  <div class="panel">
+    <h2>02 — 計測</h2>
+    <p style="color:var(--dim);margin-bottom:12px">
+      Apexを表示しているモニターを選択してください。「自動記録待機」をONにすると、
+      スティック操作と画面の動きからプレイ開始（訓練所/マッチ）を検知して自動で記録を開始し、
+      30秒間無操作が続くと自動停止→解析まで実行します。手動の開始/停止も併用できます。
+    </p>
+    <div class="row"><label>APEXを表示しているモニター</label>
+      <select id="monitorSel" style="width:280px"></select>
+      <span id="monitorInfo" style="color:var(--dim);font-size:11px"></span></div>
+    <canvas id="scope" width="920" height="120"></canvas>
+    <div style="margin:12px 0">
+      <span class="stat"><b id="nSamples">0</b><span>INPUT SAMPLES</span></span>
+      <span class="stat"><b id="nFrames">0</b><span>FRAMES</span></span>
+      <span class="stat"><b id="stickActive">0%</b><span>STICK ACTIVITY</span></span>
+      <span class="stat"><b id="screenMotion">0</b><span>SCREEN MOTION</span></span>
+      <span class="stat"><b id="status">待機中</b><span>STATUS</span></span>
+    </div>
+    <div class="row"><label>射撃ボタン（区間分離に使用）</label>
+      <select id="bindFireSel" style="width:280px"></select></div>
+    <div class="row"><label>ADSボタン</label>
+      <select id="bindAdsSel" style="width:280px"></select></div>
+    <div class="row"><label>学習用データセット収集</label>
+      <select id="dsCapture"><option>OFF</option><option>ON</option></select>
+      <span id="dsCount" style="color:var(--dim);font-size:11px"></span></div>
+    <div id="progWrap" style="display:none;margin:10px 0">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-bottom:4px">
+        <span id="progPhase"></span><span id="progText"></span>
+      </div>
+      <div style="height:10px;background:#0C1017;border:1px solid var(--line);border-radius:5px;overflow:hidden">
+        <div id="progBar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--cyan),var(--accent));transition:width .3s"></div>
+      </div>
+    </div>
+    <button id="btnArm" class="ghost">自動記録待機: OFF</button>
+    <button id="btnStart">手動で記録開始</button>
+    <button id="btnStop" class="ghost">停止して解析</button>
+  </div>
+
+  <!-- ============ 03 結果 ============ -->
+  <div class="panel" id="resultPanel" style="display:none">
+    <h2>03 — 推奨設定（現在 → 提案）</h2>
+    <div id="resultBody"></div>
+    <div id="reasons" style="margin-top:14px"></div>
+    <p class="warn">※ 提案値は hs2.evua.cc（HyperStrike Hub）とAPEXゲーム内設定に手動で反映してください。1項目ずつ変更→射撃訓練場で検証の反復を推奨します。</p>
+    <button id="btnCopy" style="margin-top:10px">推奨JSONをコピー</button>
+    <button id="btnExportHub" style="margin-top:10px">HYPERSTRIKE用プロファイルを書出</button>
+    <p style="color:var(--dim);font-size:11px;margin-top:6px">
+      ※ Hub形式(.json)で書出します。事前にHubのバックアップを読込済みの場合はボタンマッピング等も引き継がれます。
+      HyperStrike Hubの「設定のバックアップ」→ 復元から取り込んでください。</p>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ============ 定義 ============
+const OPTS = {
+  pollingRate:[250,500,1000,2000,4000,8000],
+  reportRate:[250,500,1000,2000,4000,8000,32000],
+  stickSampling:["Extreme","Excellent","Good","Robust"],
+  quantization:["無制限","11bit","10bit","9bit","8bit"],
+  advSampling:["オフ","14bit","15bit","16bit"],
+  curvePreset:["デフォルト","クイック","精密","安定","デジタル","ダイナミック","カスタム"],
+  rcMode:["ベーシック","アドバンスド"],
+};
+const WEAPONS=["自動認識","なし/その他","R-301","フラットライン","ネメシス","ヘムロック","R-99","CAR","ボルト","オルタネーター","プラウラー","スピットファイア","ディヴォーション","ハボック","L-STAR"];
+const OPTIC_KEYS=["1x","2x","3x","4x","6x","8x","10x"];
+const CURVE_DEF=[{in:125,out:125},{in:251,out:251},{in:376,out:376},{in:502,out:502},
+                 {in:635,out:635},{in:702,out:702},{in:769,out:769},{in:884,out:884}];
+const RCADV_DEF=[{speed:32,rc:-70},{speed:80,rc:-70},{speed:128,rc:-70},{speed:192,rc:-70},{speed:255,rc:-70}];
+const STICK_FIELDS=[
+  {k:"centerDZ",l:"中心デッドゾーン [%]",min:0,max:30,step:1,def:0},
+  {k:"antiDZ",l:"アンチデッドゾーン [%]",min:0,max:30,step:1,def:0},
+  {k:"outerDZ",l:"外周デッドゾーン [%]",min:0,max:30,step:1,def:0},
+  {k:"curvePreset",l:"カーブプリセット",sel:"curvePreset",def:"デフォルト"},
+  {k:"curveAdjust",l:"カーブ調整 (-5〜+5)",min:-5,max:5,step:1,def:0},
+  {k:"rcEnabled",l:"RC2.0 有効",bool:true,def:true},
+  {k:"rcMode",l:"RCモード",sel:"rcMode",def:"アドバンスド"},
+  {k:"rcStrength",l:"全域RC強度（ベーシック時）",min:-500,max:500,step:1,def:-70},
+];
+
+// ============ UI構築 ============
+function fillSelect(el, opts, val){
+  el.innerHTML="";
+  opts.forEach(o=>{const e=document.createElement("option");e.value=o;e.textContent=o;el.appendChild(e);});
+  if(val!==undefined) el.value=String(val);
+}
+function buildStick(containerId, p){
+  const c=document.getElementById(containerId); c.innerHTML="";
+  STICK_FIELDS.forEach(f=>{
+    const row=document.createElement("div");row.className="row";row.id=`${p}_${f.k}_row`;
+    const lab=document.createElement("label");lab.textContent=f.l;row.appendChild(lab);
+    let inp;
+    if(f.sel){inp=document.createElement("select");fillSelect(inp,OPTS[f.sel],f.def);}
+    else if(f.bool){inp=document.createElement("select");fillSelect(inp,["有効","無効"],f.def?"有効":"無効");}
+    else{inp=document.createElement("input");inp.type="number";inp.min=f.min;inp.max=f.max;inp.step=f.step;inp.value=f.def;}
+    inp.id=`${p}_${f.k}`;row.appendChild(inp);c.appendChild(row);
+  });
+  // カスタムカーブ P1-P8
+  const cw=document.createElement("div");cw.id=`${p}_curveWrap`;
+  cw.innerHTML=`<div class="cat">カスタムカーブ P1〜P8（入力/出力: 0〜1000・単調増加。デッドゾーン変更時はHub実機と同様に自動リスケール）</div>`;
+  const cg=document.createElement("div");cg.className="grid";cg.style.gridTemplateColumns="repeat(4,1fr)";
+  CURVE_DEF.forEach((pt,i)=>{
+    const cell=document.createElement("div");cell.className="cell";
+    cell.innerHTML=`<div class="t">P${i+1}</div>
+      <span style="color:var(--dim);font-size:10px">入</span>
+      <input type="number" min="0" max="1000" id="${p}_cp${i}_in" value="${pt.in}">
+      <span style="color:var(--dim);font-size:10px">出</span>
+      <input type="number" min="0" max="1000" id="${p}_cp${i}_out" value="${pt.out}">`;
+    cg.appendChild(cell);
+  });
+  cw.appendChild(cg);c.appendChild(cw);
+  // 速度RCカーブ P1-P5
+  const rw=document.createElement("div");rw.id=`${p}_rcAdvWrap`;
+  rw.innerHTML=`<div class="cat">速度RCカーブ P1〜P5（速度0〜255・最終255固定 / RC: -500〜+500。負=応答ブースト・正=平滑化）</div>`;
+  const rg=document.createElement("div");rg.className="grid";rg.style.gridTemplateColumns="repeat(5,1fr)";
+  RCADV_DEF.forEach((t,i)=>{
+    const cell=document.createElement("div");cell.className="cell";
+    cell.innerHTML=`<div class="t">P${i+1}</div>
+      <div>速度 <input type="number" min="0" max="255" id="${p}_rc${i}_speed" value="${t.speed}" ${i===4?"readonly":""}></div>
+      <div>RC <input type="number" min="-500" max="500" id="${p}_rc${i}_rc" value="${t.rc}"></div>`;
+    rg.appendChild(cell);
+  });
+  rw.appendChild(rg);c.appendChild(rw);
+  // 条件付き表示
+  const syncVis=()=>{
+    const isCustom=document.getElementById(`${p}_curvePreset`).value==="カスタム";
+    const isAdv=document.getElementById(`${p}_rcMode`).value==="アドバンスド";
+    document.getElementById(`${p}_curveWrap`).style.display=isCustom?"":"none";
+    document.getElementById(`${p}_rcAdvWrap`).style.display=isAdv?"":"none";
+    document.getElementById(`${p}_rcStrength_row`).style.display=isAdv?"none":"flex";
+  };
+  document.getElementById(`${p}_curvePreset`).addEventListener("change",syncVis);
+  document.getElementById(`${p}_rcMode`).addEventListener("change",syncVis);
+  syncVis();
+  // ---- Hub実機仕様の再現: DZ変更でカスタムカーブ点を連動リスケール ----
+  // 入力軸ドメイン: [中心DZ*10, 1000-外周DZ*10] / 出力軸ドメイン: [アンチDZ*10, 1000]
+  window._dzPrev=window._dzPrev||{};
+  const readDZ=()=>({c:+document.getElementById(`${p}_centerDZ`).value||0,
+                     a:+document.getElementById(`${p}_antiDZ`).value||0,
+                     o:+document.getElementById(`${p}_outerDZ`).value||0});
+  window._dzPrev[p]=readDZ();
+  const remap=(v,lo0,hi0,lo1,hi1)=>{
+    if(hi0<=lo0) return v;
+    const rel=Math.min(1,Math.max(0,(v-lo0)/(hi0-lo0)));
+    return Math.round(lo1+rel*(hi1-lo1));
+  };
+  const onDZ=()=>{
+    const prev=window._dzPrev[p], now=readDZ();
+    if(document.getElementById(`${p}_curvePreset`).value==="カスタム"){
+      const li0=prev.c*10, hi0=1000-prev.o*10, li1=now.c*10, hi1=1000-now.o*10;
+      const lo0=prev.a*10, lo1=now.a*10;
+      let lastIn=li1, lastOut=lo1;
+      for(let i=0;i<8;i++){
+        const ein=document.getElementById(`${p}_cp${i}_in`);
+        const eout=document.getElementById(`${p}_cp${i}_out`);
+        let nin=remap(+ein.value,li0,hi0,li1,hi1);
+        let nout=remap(+eout.value,lo0,1000,lo1,1000);
+        if(nin<=lastIn) nin=lastIn+1;
+        if(nout<lastOut) nout=lastOut;
+        ein.value=Math.min(1000,nin); eout.value=Math.min(1000,nout);
+        lastIn=nin; lastOut=nout;
+      }
+    }
+    window._dzPrev[p]=now;
+  };
+  ["centerDZ","antiDZ","outerDZ"].forEach(k=>
+    document.getElementById(`${p}_${k}`).addEventListener("change",onDZ));
+}
+function setupGlobal(){
+  fillSelect(document.getElementById("pollingRate"),OPTS.pollingRate,8000);
+  fillSelect(document.getElementById("reportRate"),OPTS.reportRate,8000);
+  fillSelect(document.getElementById("stickSampling"),OPTS.stickSampling,"Excellent");
+  fillSelect(document.getElementById("quantization"),OPTS.quantization,"無制限");
+  fillSelect(document.getElementById("advSampling"),OPTS.advSampling,"オフ");
+  const sens=[...Array(8)].map((_,i)=>i+1);
+  fillSelect(document.getElementById("apex_lookSens"),sens,4);
+  fillSelect(document.getElementById("apex_adsSens"),sens,3);
+  fillSelect(document.getElementById("apex_weapon"),WEAPONS,"自動認識");
+  fillSelect(document.getElementById("apex_barrel"),["自動認識","なし","Lv1","Lv2","Lv3/4"],"自動認識");
+  const grid=document.getElementById("apex_opticsGrid");
+  OPTIC_KEYS.forEach(k=>{
+    const cell=document.createElement("div");cell.className="cell";
+    cell.innerHTML=`<div class="t">${k}</div>
+      <input type="number" min="0.1" max="3" step="0.05" id="apex_optic_${k}" value="1.0">`;
+    grid.appendChild(cell);
+  });
+  document.getElementById("apex_perOptic").addEventListener("change",e=>{
+    document.getElementById("apex_opticsWrap").style.display=e.target.value==="オン"?"":"none";
+  });
+}
+async function loadMonitors(){
+  const sel=document.getElementById("monitorSel");
+  try{
+    const r=await fetch("/api/monitors").then(r=>r.json());
+    sel.innerHTML="";
+    const mons=r.monitors||[];
+    if(!mons.length){
+      const o=document.createElement("option");o.value=1;
+      o.textContent="モニター情報を取得できません（mss未導入?）";sel.appendChild(o);
+      return;
+    }
+    mons.forEach(m=>{
+      const o=document.createElement("option");o.value=m.index;
+      o.textContent=`モニター${m.index} — ${m.width}×${m.height} (位置 ${m.left},${m.top})`;
+      sel.appendChild(o);
+    });
+    sel.value=String(r.selected||1);
+    document.getElementById("monitorInfo").textContent=`検出: ${mons.length}台`;
+  }catch(e){
+    sel.innerHTML="";
+    const o=document.createElement("option");o.value=1;o.textContent="取得エラー（サーバ未応答）";sel.appendChild(o);
+  }
+}
+document.addEventListener("change",e=>{
+  if(e.target.id==="monitorSel"){
+    fetch("/api/monitor",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({index:+e.target.value})});
+  }
+});
+
+// ============ 設定収集 ============
+function collectStick(p){
+  const o={};
+  STICK_FIELDS.forEach(f=>{
+    const el=document.getElementById(`${p}_${f.k}`);
+    o[f.k]=f.bool?(el.value==="有効"):(f.sel?el.value:+el.value);
+  });
+  o.curvePoints=CURVE_DEF.map((_,i)=>({
+    in:+document.getElementById(`${p}_cp${i}_in`).value,
+    out:+document.getElementById(`${p}_cp${i}_out`).value}));
+  o.rcAdvanced=RCADV_DEF.map((_,i)=>({
+    speed:+document.getElementById(`${p}_rc${i}_speed`).value,
+    rc:+document.getElementById(`${p}_rc${i}_rc`).value}));
+  return o;
+}
+function collect(){
+  const optics={};
+  OPTIC_KEYS.forEach(k=>optics[k]=+document.getElementById(`apex_optic_${k}`).value);
+  return {
+    pollingRate:+document.getElementById("pollingRate").value,
+    reportRate:+document.getElementById("reportRate").value,
+    stickSampling:document.getElementById("stickSampling").value,
+    quantization:document.getElementById("quantization").value,
+    advSampling:document.getElementById("advSampling").value,
+    apex:{
+      lookSens:+document.getElementById("apex_lookSens").value,
+      adsSens:+document.getElementById("apex_adsSens").value,
+      weapon:document.getElementById("apex_weapon").value,
+      barrel:document.getElementById("apex_barrel").value,
+      perOptic:document.getElementById("apex_perOptic").value==="オン",
+      optics},
+    rs:collectStick("rs"),
+    ls:collectStick("ls"),
+  };
+}
+async function pushCurrent(){
+  await fetch("/api/current",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(collect())});
+}
+
+// ============ 計測制御 ============
+let armed=false, lastSeq=0;
+const BIND_OPTIONS=[
+  {v:"axis:5", l:"R2 / RT トリガー (axis5)"},
+  {v:"axis:4", l:"L2 / LT トリガー (axis4)"},
+  {v:"button:5", l:"R1 / RB (XInput: button5)"},
+  {v:"button:4", l:"L1 / LB (XInput: button4)"},
+  {v:"button:10", l:"R1 (DS4: button10)"},
+  {v:"button:9", l:"L1 (DS4: button9)"},
+  {v:"button:0", l:"A / × (button0)"},
+  {v:"button:1", l:"B / ○ (button1)"},
+  {v:"button:2", l:"X / □ (button2)"},
+  {v:"button:3", l:"Y / △ (button3)"},
+  {v:"button:8", l:"LS押込み (XInput: button8)"},
+  {v:"button:9x", l:"RS押込み (XInput: button9)"},
+  {v:"button:6", l:"button6"},{v:"button:7", l:"button7"},
+  {v:"button:11", l:"button11"},{v:"button:12", l:"button12"},
+  {v:"button:13", l:"button13"},{v:"button:14", l:"button14"},
+];
+function bindToVal(b){return b?`${b.type}:${b.index}`:"axis:5";}
+function valToBind(v){const [t,i]=v.replace("x","").split(":");return {type:t,index:+i};}
+function setupBindSelects(){
+  ["bindFireSel","bindAdsSel"].forEach(id=>{
+    const s=document.getElementById(id); s.innerHTML="";
+    BIND_OPTIONS.forEach(o=>{const e=document.createElement("option");e.value=o.v;e.textContent=o.l;s.appendChild(e);});
+  });
+  document.getElementById("bindFireSel").value="axis:5";
+  document.getElementById("bindAdsSel").value="axis:4";
+  const push=async()=>{
+    await fetch("/api/bindings",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({fire:valToBind(document.getElementById("bindFireSel").value),
+                           ads:valToBind(document.getElementById("bindAdsSel").value)})});
+  };
+  document.getElementById("bindFireSel").addEventListener("change",push);
+  document.getElementById("bindAdsSel").addEventListener("change",push);
+}
+document.getElementById("dsCapture").addEventListener("change",async e=>{
+  await fetch("/api/dataset",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({enabled:e.target.value==="ON"})});
+});
+document.getElementById("btnArm").onclick=async()=>{
+  armed=!armed;
+  if(armed) await pushCurrent();
+  await fetch("/api/arm",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({enabled:armed})});
+  const b=document.getElementById("btnArm");
+  b.textContent=armed?"自動記録待機: ON（解除する）":"自動記録待機: OFF";
+  b.className=armed?"armed":"ghost";
+};
+document.getElementById("btnStart").onclick=async()=>{
+  await pushCurrent();
+  await fetch("/api/start",{method:"POST"});
+};
+document.getElementById("btnStop").onclick=async()=>{
+  await fetch("/api/stop",{method:"POST"});
+  // 結果はポーリング(resultSeq)経由で自動表示される
+};
+const PRESET_TO_INDEX={"デフォルト":0,"クイック":1,"精密":2,"安定":3,"デジタル":4,"ダイナミック":5,"カスタム":255};
+function buildHubProfile(rec){
+  // 読込済みHubプロファイルがあればそれをベースに（mapping/calibration等を保持）
+  const base=window._lastHubProfile
+    ? JSON.parse(JSON.stringify(window._lastHubProfile))
+    : {schemaVersion:15, appVersion:"2.0.0", mapping:{}, tuning:{}, calibration:{}};
+  base.exportedAt=new Date().toISOString();
+  const t=base.tuning=base.tuning||{};
+  const side=(p,suf)=>{
+    const r=rec[p];
+    t["stickCurveDeadzone"+suf]=Math.round(r.centerDZ);            // %そのまま(0〜30)
+    t["stickCurveAntiDeadzone"+suf]=Math.round(r.antiDZ);
+    t["stickCurveOuterEnd"+suf]=1000-Math.round(r.outerDZ)*10;     // カーブ座標(実機仕様)
+    t["stickCurvePreset"+suf]=PRESET_TO_INDEX[r.curvePreset]??255;
+    t["stickCurveAdjustment"+suf]=Math.round(r.curveAdjust);
+    const pts=[0,0];
+    (r.curvePoints||[]).forEach(pt=>{pts.push(Math.round(pt.in),Math.round(pt.out));});
+    pts.push(1000,1000);
+    t["stickCurvePoints"+suf]=pts;
+    const tiers=(r.rcMode==="アドバンスド"&&r.rcAdvanced)
+      ? r.rcAdvanced.map(x=>({endSpeedCode:Math.round(x.speed),rcStrength:Math.round(x.rc)}))
+      : [32,80,128,192,255].map(s=>({endSpeedCode:s,rcStrength:Math.round(r.rcStrength||0)}));
+    t["stickSpeedRc"+suf]={enabled:!!r.rcEnabled, tiers};
+  };
+  side("ls","Left"); side("rs","Right");
+  const adv={"オフ":0,"14bit":1,"15bit":2,"16bit":3}[rec.advSampling];
+  if(adv!==undefined) t.adcOversampleMode=adv;
+  const q={"無制限":12,"11bit":11,"10bit":10,"9bit":9,"8bit":8}[rec.quantization];
+  if(q!==undefined) t.xinputStickBits=q;
+  const samp={"Extreme":0,"Excellent":1,"Good":2,"Robust":3}[rec.stickSampling];
+  if(samp!==undefined&&t.adcSamplingPresetId!==4) t.adcSamplingPresetId=samp;  // カスタムADCは温存
+  return base;
+}
+document.getElementById("btnExportHub").onclick=()=>{
+  if(!window._lastRec){alert("先に解析を実行してください");return;}
+  const prof=buildHubProfile(window._lastRec);
+  const blob=new Blob([JSON.stringify(prof,null,2)],{type:"application/json"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="hs-driver-optimized-"+new Date().toISOString().slice(0,10)+".json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+document.getElementById("btnQuit").onclick=async()=>{
+  if(!confirm("アプリを終了しますか？")) return;
+  try{await fetch("/api/shutdown",{method:"POST"});}catch(e){}
+  document.body.innerHTML='<p style="padding:40px;font-family:monospace">アプリを終了しました。このタブは閉じて構いません。</p>';
+};
+document.getElementById("btnCopy").onclick=()=>{
+  if(window._lastRec) navigator.clipboard.writeText(JSON.stringify(window._lastRec,null,2));
+};
+
+// ============ テレメトリ ============
+const scope=document.getElementById("scope"),ctx=scope.getContext("2d");
+function drawScope(recent){
+  ctx.fillStyle="#0C1017";ctx.fillRect(0,0,920,120);
+  ctx.strokeStyle="#1E2733";ctx.beginPath();ctx.moveTo(0,60);ctx.lineTo(920,60);ctx.stroke();
+  const draw=(get,color)=>{ctx.strokeStyle=color;ctx.lineWidth=1.2;ctx.beginPath();
+    recent.forEach((s,i)=>{const x=i/200*920,y=60-get(s)*56;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();};
+  draw(s=>s.rx,"#4FD8EB");draw(s=>s.ry,"#FFB454");
+}
+async function poll(){
+  try{
+    const r=await fetch("/api/status").then(r=>r.json());
+    document.getElementById("nSamples").textContent=r.samples;
+    document.getElementById("nFrames").textContent=r.frames;
+    document.getElementById("status").textContent=r.status;
+    document.getElementById("stickActive").textContent=Math.round((r.stickActive||0)*100)+"%";
+    document.getElementById("screenMotion").textContent=r.screenMotion??0;
+    document.getElementById("dsCount").textContent=
+      r.datasetCapture?`収集中: ${r.datasetCount}枚 (dataset\\raw)`:(r.datasetCount?`${r.datasetCount}枚収集済み`:"");
+    document.getElementById("gpu").innerHTML=
+      (r.gpu?'<span style="color:var(--green)">● GPU</span> ':'<span style="color:var(--red)">● CPU</span> ')+r.provider+
+      ' ／ モデル: '+(r.model||'なし')+(r.model==='apex.onnx'?' <span style="color:var(--green)">(Apex特化/敵のみ検出)</span>':'');
+    if(r.recent&&r.recent.length)drawScope(r.recent);
+    const pg=r.progress||{};
+    const analyzing=pg.total>0&&pg.phase&&pg.phase!=="完了";
+    document.getElementById("progWrap").style.display=analyzing?"":"none";
+    if(analyzing){
+      const pct=Math.round(pg.done/pg.total*100);
+      document.getElementById("progBar").style.width=pct+"%";
+      document.getElementById("progPhase").textContent=pg.phase;
+      document.getElementById("progText").textContent=`${pg.done} / ${pg.total} (${pct}%)`;
+    }
+    // サーバ側の自動解析完了を検知して結果を表示
+    if(r.resultSeq&&r.resultSeq!==lastSeq){
+      lastSeq=r.resultSeq;
+      const res=await fetch("/api/result").then(r=>r.json());
+      if(res&&res.rec) showResult(res);
+      if(armed&&!r.armed){armed=false;
+        const b=document.getElementById("btnArm");
+        b.textContent="自動記録待機: OFF";b.className="ghost";}
+    }
+  }catch(e){}
+  setTimeout(poll,500);
+}
+
+// ============ 結果表示 ============
+function showResult(res){
+  window._lastRec=res.rec;
+  const cur=collect();
+  const rows=[];
+  const cmp=(label,a,b)=>rows.push(`<div class="row"><label>${label}</label>
+    <span style="color:var(--dim);width:110px">${a}</span><span style="color:var(--dim)">→</span>
+    <span class="${String(a)!==String(b)?'diff':''}" style="width:110px">${b}</span>
+    ${String(a)!==String(b)?'<span style="color:var(--accent);font-size:11px">CHANGED</span>':''}</div>`);
+  cmp("ポーリングレート",cur.pollingRate,res.rec.pollingRate);
+  cmp("スティックサンプリング",cur.stickSampling,res.rec.stickSampling);
+  cmp("高度サンプリング",cur.advSampling,res.rec.advSampling);
+  ["rs","ls"].forEach(p=>{
+    rows.push(`<div class="cat">${p==="rs"?"右スティック":"左スティック"}</div>`);
+    STICK_FIELDS.forEach(f=>cmp(f.l,String(cur[p][f.k]),String(res.rec[p][f.k])));
+    (res.rec[p].curvePoints||[]).forEach((pt,i)=>{
+      const c0=cur[p].curvePoints[i];
+      if(c0) cmp(`カーブP${i+1} (入${pt.in})`,`出 ${c0.out}`,`出 ${pt.out}`);
+    });
+    (res.rec[p].rcAdvanced||[]).forEach((t,i)=>{
+      const c0=cur[p].rcAdvanced[i];
+      if(c0) cmp(`速度RC P${i+1} (速度${t.speed})`,`RC ${c0.rc}`,`RC ${t.rc}`);
+    });
+  });
+  document.getElementById("resultBody").innerHTML=rows.join("");
+  const auditRows=(res.audit||[]).map(a=>
+    `<tr><td style="padding:2px 8px;color:${a.rule.startsWith("_")?"var(--cyan)":"var(--ink)"}">${a.rule}</td>
+     <td style="padding:2px 8px;color:var(--dim)">${a.value??"-"}</td>
+     <td style="padding:2px 8px;color:var(--dim)">${a.threshold}</td>
+     <td style="padding:2px 8px;color:${a.fired?"var(--green)":"var(--dim)"}">${a.fired?"発動":"×"}</td>
+     <td style="padding:2px 8px">${a.action}</td></tr>`).join("");
+  document.getElementById("reasons").innerHTML=
+    (res.reasons||[]).map(r=>`<p class="reason">▸ ${r}</p>`).join("")+
+    `<div class="cat" style="margin-top:14px">判定監査（実測値 vs しきい値）</div>
+     <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11px;width:100%">
+     <tr style="color:var(--cyan)"><td style="padding:2px 8px">判定項目</td><td style="padding:2px 8px">実測値</td>
+     <td style="padding:2px 8px">しきい値</td><td style="padding:2px 8px">結果</td><td style="padding:2px 8px">アクション</td></tr>
+     ${auditRows}</table></div>`+
+    `<p style="color:var(--dim);font-size:11px;margin-top:8px">解析モード: ${res.aiUsed?"AI Vision("+res.provider+") + 入力ログ":"入力ログのみ（モデル未ロード）"}${res.logPath?" ／ 解析ログ: "+res.logPath:""}<br>検出プレビュー画像（枠付き）: logs\\detections\\ フォルダに保存されます。どのキャラ/ダミーが検出されたかを目視確認できます</p>`;
+  document.getElementById("resultPanel").style.display="block";
+}
+
+
+// ============ プロファイルJSONの読込/書出 ============
+function setVal(id, v){
+  const el=document.getElementById(id);
+  if(!el||v===undefined||v===null) return false;
+  if(el.tagName==="SELECT"){
+    const s=String(v);
+    if([...el.options].some(o=>o.value===s)) el.value=s; else return false;
+  }else el.value=v;
+  el.dispatchEvent(new Event("change",{bubbles:true}));
+  return true;
+}
+function pick(obj, keys){
+  for(const k of keys){ if(obj&&obj[k]!==undefined) return obj[k]; }
+  return undefined;
+}
+const CURVE_PRESET_BY_INDEX=["デフォルト","クイック","精密","安定","デジタル","ダイナミック","カスタム"];
+function normPreset(v){
+  if(v===undefined) return undefined;
+  if(v===255||v==="255") return "カスタム";   // Hubのカスタム番兵値
+  if(typeof v==="number") return CURVE_PRESET_BY_INDEX[v];
+  const m={default:"デフォルト",quick:"クイック",precise:"精密",precision:"精密",
+           stable:"安定",steady:"安定",digital:"デジタル",dynamic:"ダイナミック",custom:"カスタム"};
+  const s=String(v).toLowerCase();
+  return m[s]||(CURVE_PRESET_BY_INDEX.includes(v)?v:undefined);
+}
+function normBool(v){
+  if(typeof v==="boolean") return v;
+  if(v===1||v==="1"||String(v).toLowerCase()==="true"||v==="有効"||String(v).toLowerCase()==="on") return true;
+  if(v===0||v==="0"||String(v).toLowerCase()==="false"||v==="無効"||String(v).toLowerCase()==="off") return false;
+  return undefined;
+}
+function normCurvePoints(v){
+  // 対応形式: [{in,out}...] / [[in,out]...] / フラット[in0,out0,...](16 or 20値=P0/P9込み)
+  if(!Array.isArray(v)) return undefined;
+  let pairs=null;
+  if(v.length&&typeof v[0]==="object"&&!Array.isArray(v[0])){
+    pairs=v.map(p=>[pick(p,["in","input","x","i"]),pick(p,["out","output","y","o"])]);
+  }else if(v.length&&Array.isArray(v[0])){
+    pairs=v.map(p=>[p[0],p[1]]);
+  }else if(v.length===16||v.length===20){
+    pairs=[]; for(let i=0;i<v.length;i+=2) pairs.push([v[i],v[i+1]]);
+  }
+  if(!pairs) return undefined;
+  if(pairs.length===10) pairs=pairs.slice(1,9);     // P0/P9込み→P1〜P8
+  if(pairs.length!==8) return undefined;
+  // 0〜1の正規化値なら0〜1000へ
+  const maxv=Math.max(...pairs.flat().map(Number));
+  const k=(maxv<=1.001)?1000:1;
+  return pairs.map(p=>({in:Math.round(p[0]*k),out:Math.round(p[1]*k)}));
+}
+function normRcAdvanced(v){
+  if(!Array.isArray(v)||!v.length) return undefined;
+  let tiers=v.map(t=>Array.isArray(t)?{speed:t[0],rc:t[1]}
+    :{speed:pick(t,["speed","endSpeedCode","end_speed_code","velocity","v","x"]),
+      rc:pick(t,["rc","rcStrength","rc_strength","strength","value","y"])});
+  tiers=tiers.filter(t=>t.speed!==undefined&&t.rc!==undefined).slice(0,5);
+  return tiers.length===5?tiers:undefined;
+}
+function applyStickProfile(p, src){
+  if(!src) return 0;
+  let n=0;
+  const dz=(keys,id)=>{const v=pick(src,keys); if(v!==undefined&&setVal(id,Math.round(+v))) n++;};
+  dz(["centerDZ","center_deadzone","centerDeadzone","center_dz","deadzone_center"],`${p}_centerDZ`);
+  dz(["antiDZ","anti_deadzone","antiDeadzone","anti_dz","deadzone_anti"],`${p}_antiDZ`);
+  dz(["outerDZ","outer_deadzone","outerDeadzone","outer_dz","deadzone_outer","outer_end"],`${p}_outerDZ`);
+  const preset=normPreset(pick(src,["curvePreset","curve_preset","preset"]));
+  if(preset&&setVal(`${p}_curvePreset`,preset)) n++;
+  const adj=pick(src,["curveAdjust","curve_adjust","adjust"]);
+  if(adj!==undefined&&setVal(`${p}_curveAdjust`,Math.round(+adj))) n++;
+  const rcSrc=pick(src,["rc","rc2","speedRc","speed_rc"])||src;
+  const en=normBool(pick(rcSrc,["rcEnabled","enabled","rc_enabled"]));
+  if(en!==undefined&&setVal(`${p}_rcEnabled`,en?"有効":"無効")) n++;
+  const mode=pick(rcSrc,["rcMode","mode"]);
+  if(mode!==undefined){
+    const m=(String(mode).toLowerCase()==="advanced"||mode==="アドバンスド"||mode===1)?"アドバンスド":"ベーシック";
+    if(setVal(`${p}_rcMode`,m)) n++;
+  }
+  const st=pick(rcSrc,["rcStrength","strength","rc_strength","basic_strength","basicStrength"]);
+  if(st!==undefined&&setVal(`${p}_rcStrength`,Math.round(+st))) n++;
+  const cp=normCurvePoints(pick(src,["curvePoints","curve_points","points","curve"]));
+  if(cp){cp.forEach((pt,i)=>{setVal(`${p}_cp${i}_in`,pt.in);setVal(`${p}_cp${i}_out`,pt.out);});n++;}
+  const adv=normRcAdvanced(pick(rcSrc,["rcAdvanced","advanced","rc_advanced","speed_curve","speedCurve","tiers"]));
+  if(adv){adv.forEach((t,i)=>{setVal(`${p}_rc${i}_speed`,Math.round(+t.speed));setVal(`${p}_rc${i}_rc`,Math.round(+t.rc));});n++;}
+  return n;
+}
+const IMPORT_LOG=[];
+function logSet(label, id, v){
+  if(v===undefined||v===null) return;
+  if(setVal(id, v)){ IMPORT_LOG.push(`${label} = ${v}`); return true; }
+  IMPORT_LOG.push(`${label} = ${v} (範囲外/未対応で反映不可)`);
+  return false;
+}
+// Hubカーブ座標(0〜1000=0〜100%)→UIの%値(0〜30)への変換
+function hubDzToPct(v){          // 中心/アンチ: 0〜300(=0〜30%) → %
+  if(v===undefined) return undefined;
+  v=+v;
+  return (v>30)? Math.round(v/10) : Math.round(v);   // 30以下なら既に%とみなす
+}
+function hubOuterToPct(v){       // 外周: カーブ終端座標(1000=DZ0%) → %
+  if(v===undefined) return undefined;
+  v=+v;
+  if(v>=100) return Math.max(0, Math.min(30, Math.round((1000-v)/10)));
+  return Math.round(v);          // 小さい値なら既に%とみなす
+}
+function normRcContainer(rc){
+  // {enabled, tiers|entries|advanced.tiers|speedCurve, rcStrength|basic|strength, mode}
+  if(!rc||typeof rc!=="object") return null;
+  const tiers=normRcAdvanced(rc.tiers||rc.entries||rc.speedCurve
+        ||(rc.advanced&&(rc.advanced.tiers||rc.advanced.entries))||rc.points);
+  const strength=rc.rcStrength??rc.strength??rc.basic
+        ??(rc.basicMode&&rc.basicMode.strength);
+  const en=normBool(rc.enabled);
+  let mode;
+  if(rc.mode!==undefined){
+    mode=(String(rc.mode).toLowerCase()==="advanced"||rc.mode===1||rc.mode==="アドバンスド")?"アドバンスド":"ベーシック";
+  }else if(tiers) mode="アドバンスド";
+  else if(strength!==undefined) mode="ベーシック";
+  return {enabled:en, tiers, strength, mode};
+}
+function applyHubBackup(obj){
+  // HyperStrike Hub 設定バックアップ実形式:
+  // { schemaVersion, exportedAt, appVersion, mapping, tuning: { stickCurve*Left/Right, stickSpeedRcLeft/Right, ... }, calibration? }
+  const t=obj.tuning||{};
+  let n=0;
+  const side=(suf,p)=>{
+    const jp=(p==="rs")?"右":"左";
+    if(logSet(`${jp}:中心DZ`,`${p}_centerDZ`, hubDzToPct(t["stickCurveDeadzone"+suf]))) n++;
+    if(logSet(`${jp}:アンチDZ`,`${p}_antiDZ`, hubDzToPct(t["stickCurveAntiDeadzone"+suf]))) n++;
+    if(logSet(`${jp}:外周DZ`,`${p}_outerDZ`, hubOuterToPct(t["stickCurveOuterEnd"+suf]))) n++;
+    const preset=normPreset(t["stickCurvePreset"+suf]);
+    if(preset&&logSet(`${jp}:プリセット`,`${p}_curvePreset`, preset)) n++;
+    if(logSet(`${jp}:カーブ調整`,`${p}_curveAdjust`, t["stickCurveAdjustment"+suf])) n++;
+    const cp=normCurvePoints(t["stickCurvePoints"+suf]);
+    if(cp){cp.forEach((pt,i)=>{setVal(`${p}_cp${i}_in`,pt.in);setVal(`${p}_cp${i}_out`,pt.out);});
+      IMPORT_LOG.push(`${jp}:カーブP1-P8 = [${cp.map(x=>x.in+"/"+x.out).join(", ")}]`);n++;}
+    const rc=normRcContainer(t["stickSpeedRc"+suf]);
+    if(rc){
+      if(rc.enabled!==undefined&&logSet(`${jp}:RC有効`,`${p}_rcEnabled`, rc.enabled?"有効":"無効")) n++;
+      if(rc.mode&&logSet(`${jp}:RCモード`,`${p}_rcMode`, rc.mode)) n++;
+      if(rc.tiers){rc.tiers.forEach((tr,i)=>{setVal(`${p}_rc${i}_speed`,Math.round(+tr.speed));setVal(`${p}_rc${i}_rc`,Math.round(+tr.rc));});
+        IMPORT_LOG.push(`${jp}:速度RC = [${rc.tiers.map(x=>x.speed+":"+x.rc).join(", ")}]`);n++;}
+      if(rc.strength!==undefined&&logSet(`${jp}:全域RC強度`,`${p}_rcStrength`, Math.round(+rc.strength))) n++;
+    }else if(t["stickSpeedRc"+suf]!==undefined){
+      IMPORT_LOG.push(`${jp}:速度RC = 未対応の内部形式(キー: ${Object.keys(t["stickSpeedRc"+suf]||{}).join(",")||typeof t["stickSpeedRc"+suf]})`);
+    }
+  };
+  side("Left","ls"); side("Right","rs");
+  const pr=t.pollingRate??t.polling_rate;
+  if(pr!==undefined&&logSet("ポーリングレート","pollingRate",pr)) n++;
+  if(t.xinputStickBits!==undefined){
+    const q=(t.xinputStickBits===0||t.xinputStickBits>=12)?"無制限":`${t.xinputStickBits}bit`;
+    if(logSet("量子化","quantization",q)) n++;
+  }
+  if(t.adcOversampleMode!==undefined){
+    const av=["オフ","14bit","15bit","16bit"][t.adcOversampleMode];
+    if(av){ if(logSet("高度サンプリング","advSampling",av)) n++; }
+    else IMPORT_LOG.push(`高度サンプリング = 未知の値(adcOversampleMode ${t.adcOversampleMode}) → 変更せず維持`);
+  }
+  if(t.adcSamplingPresetId!==undefined){
+    const s=["Extreme","Excellent","Good","Robust"][t.adcSamplingPresetId];
+    if(s){ if(logSet("サンプリング","stickSampling",s)) n++; }
+    else IMPORT_LOG.push(`サンプリング = カスタムADC設定(presetId ${t.adcSamplingPresetId}) → 変更せず維持`);
+  }
+  return n;
+}
+function applyProfile(obj){
+  let applied=0; const unmapped=[];
+  if(obj&&typeof obj.tuning==="object"){
+    window._lastHubProfile=JSON.parse(JSON.stringify(obj));   // 書出時のベースとして保持
+    applied+=applyHubBackup(obj);
+  }
+  const pr=pick(obj,["pollingRate","polling_rate","polling"]);
+  if(pr!==undefined&&setVal("pollingRate",pr)) applied++;
+  const rr=pick(obj,["reportRate","report_rate","report"]);
+  if(rr!==undefined&&setVal("reportRate",rr)) applied++;
+  const ss=pick(obj,["stickSampling","stick_sampling","sampling"]);
+  if(ss!==undefined&&setVal("stickSampling",ss)) applied++;
+  const qt=pick(obj,["quantization","quantize","stick_quantization"]);
+  if(qt!==undefined&&setVal("quantization",qt)) applied++;
+  const as_=pick(obj,["advSampling","adv_sampling","advanced_sampling"]);
+  if(as_!==undefined&&setVal("advSampling",as_)) applied++;
+  const rsSrc=pick(obj,["rs","right","rightStick","right_stick","r"]);
+  const lsSrc=pick(obj,["ls","left","leftStick","left_stick","l"]);
+  applied+=applyStickProfile("rs",rsSrc);
+  applied+=applyStickProfile("ls",lsSrc);
+  // apex設定（本アプリ書出JSONの往復用）
+  if(obj.apex){
+    const a=obj.apex;
+    if(a.lookSens!==undefined&&setVal("apex_lookSens",a.lookSens)) applied++;
+    if(a.adsSens!==undefined&&setVal("apex_adsSens",a.adsSens)) applied++;
+    if(a.weapon!==undefined&&setVal("apex_weapon",a.weapon)) applied++;
+    if(a.perOptic!==undefined&&setVal("apex_perOptic",a.perOptic?"オン":"オフ")) applied++;
+    if(a.optics) OPTIC_KEYS.forEach(k=>{if(a.optics[k]!==undefined)setVal(`apex_optic_${k}`,a.optics[k]);});
+  }
+  const known=new Set(["pollingRate","polling_rate","polling","reportRate","report_rate","report",
+    "stickSampling","stick_sampling","sampling","quantization","quantize","stick_quantization",
+    "advSampling","adv_sampling","advanced_sampling","rs","ls","right","left","rightStick","leftStick",
+    "right_stick","left_stick","r","l","apex","version","name","profile","meta","device","firmware",
+    "schemaVersion","exportedAt","appVersion","mapping","tuning","calibration","fineTuneData","updatedAt"]);
+  Object.keys(obj||{}).forEach(k=>{if(!known.has(k))unmapped.push(k);});
+  return {applied, unmapped};
+}
+function importJsonText(text){
+  const msg=document.getElementById("importMsg");
+  IMPORT_LOG.length=0;
+  try{
+    const obj=JSON.parse(text);
+    const r=applyProfile(obj);
+    const det=document.getElementById("importDetail");
+    det.style.display=IMPORT_LOG.length?"":"none";
+    det.innerHTML=IMPORT_LOG.map(l=>`<div>・${l}</div>`).join("");
+    if(r.applied===0){
+      msg.style.color="var(--red)";
+      msg.textContent="読み込めた項目がありません。JSONの構造が未対応の可能性があります。"+
+        (r.unmapped.length?` 未対応キー: ${r.unmapped.slice(0,10).join(", ")}`:"");
+    }else{
+      msg.style.color="var(--green)";
+      ["rs","ls"].forEach(p=>{ if(window._dzPrev) window._dzPrev[p]={
+        c:+document.getElementById(`${p}_centerDZ`).value||0,
+        a:+document.getElementById(`${p}_antiDZ`).value||0,
+        o:+document.getElementById(`${p}_outerDZ`).value||0};});
+      msg.textContent=`${r.applied}項目グループを読み込みました。`+
+        (r.unmapped.length?` 未対応キー(無視): ${r.unmapped.slice(0,10).join(", ")}`:"");
+    }
+  }catch(e){
+    msg.style.color="var(--red)";
+    msg.textContent="JSONの解析に失敗しました: "+e.message;
+  }
+}
+document.getElementById("profileFile").addEventListener("change",e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>importJsonText(rd.result);
+  rd.readAsText(f,"utf-8");
+  e.target.value="";
+});
+document.getElementById("btnPaste").onclick=()=>{
+  const w=document.getElementById("pasteWrap");
+  w.style.display=w.style.display==="none"?"":"none";
+};
+document.getElementById("btnPasteApply").onclick=()=>importJsonText(document.getElementById("pasteArea").value);
+document.getElementById("btnExport").onclick=()=>{
+  const blob=new Blob([JSON.stringify(collect(),null,2)],{type:"application/json"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="hyperstrike-profile.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+// ============ 初期化 ============
+setupGlobal();
+buildStick("rsFields","rs");
+buildStick("lsFields","ls");
+setupBindSelects();
+
+// ---- 設定の自動保存（変更から0.8秒後にサーバへ保存） ----
+let _saveTimer=null, _restoring=false;
+document.addEventListener("change",e=>{
+  if(_restoring) return;
+  const id=e.target.id||"";
+  if(id==="monitorSel"||id==="dsCapture"||id.startsWith("bind")||id==="profileFile") return;
+  clearTimeout(_saveTimer);
+  _saveTimer=setTimeout(pushCurrent, 800);
+});
+
+// ---- 起動時: 保存済み設定を復元 ----
+async function restoreSettings(){
+  try{
+    const s=await fetch("/api/settings").then(r=>r.json());
+    _restoring=true;
+    if(s.current&&s.current.rs){
+      applyProfile(s.current);
+      const a=s.current.apex||{};
+      if(a.weapon!==undefined) setVal("apex_weapon",a.weapon);
+      if(a.barrel!==undefined) setVal("apex_barrel",a.barrel);
+      if(a.perOptic!==undefined){setVal("apex_perOptic",a.perOptic?"オン":"オフ");
+        document.getElementById("apex_opticsWrap").style.display=a.perOptic?"":"none";}
+      if(a.optics) OPTIC_KEYS.forEach(k=>{if(a.optics[k]!==undefined)setVal(`apex_optic_${k}`,a.optics[k]);});
+      document.getElementById("importMsg").style.color="var(--dim)";
+      document.getElementById("importMsg").textContent="前回の設定を復元しました";
+      document.getElementById("importDetail").style.display="none";
+    }
+    if(s.bindings){
+      document.getElementById("bindFireSel").value=bindToVal(s.bindings.fire);
+      document.getElementById("bindAdsSel").value=bindToVal(s.bindings.ads);
+    }
+    if(s.monitor){
+      await loadMonitors();
+      document.getElementById("monitorSel").value=String(s.monitor);
+    }else{
+      await loadMonitors();
+    }
+  }catch(e){ await loadMonitors(); }
+  _restoring=false;
+}
+restoreSettings();
+// タブを閉じたらサーバへ通知（60秒の猶予後に自動終了しログのロックを解放）
+window.addEventListener("pagehide",()=>{try{navigator.sendBeacon("/api/goodbye","");}catch(e){}});
+
+// ---- デフォルトに戻す ----
+document.getElementById("btnResetDefaults").onclick=async()=>{
+  if(!confirm("すべての設定値をデフォルトに戻しますか？（保存済み設定も削除されます）")) return;
+  await fetch("/api/reset_settings",{method:"POST"});
+  location.reload();
+};
+poll();
+</script>
+</body>
+</html>

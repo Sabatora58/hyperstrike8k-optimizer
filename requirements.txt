@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+numpy
+mss
+pygame
+opencv-python
+winocr  # 武器HUDのOCR自動認識(Windows標準OCR)
+# GPU解析（いずれか1つ。優先順に記載）
+# NVIDIA (CUDA):        pip install onnxruntime-gpu
+# Windows汎用 (DirectML): pip install onnxruntime-directml
+# CPUフォールバック:      pip install onnxruntime
