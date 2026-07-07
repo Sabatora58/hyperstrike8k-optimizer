@@ -32,8 +32,6 @@ HyperStrike 8K（HyperStrike Hub）の各設定項目の最適値を提案する
 4. 画面の指示に従って: HyperStrike Hubのバックアップを読込 → モニターと射撃ボタンを選択 →
    計測（訓練場か実戦を2〜5分）→ 解析 → 提案されたプロファイルを書出してHubで復元
 
-うまく起動しない場合は `start_debug.bat`（エラーが画面に残るデバッグ起動）を使ってください。
-GPUが使われない場合は `fix_gpu.bat` を実行してください。
 
 ## 主なファイル
 
@@ -44,7 +42,6 @@ GPUが使われない場合は `fix_gpu.bat` を実行してください。
 | `static/index.html` | ブラウザUI |
 | `prep_dataset.py`  | カスタムモデル学習パイプライン |
 | `setup_portable.bat` / `start_portable.bat` | セットアップ / 起動 |
-| `fix_gpu.bat` | トラブルシューティング |
 
 ## プライバシー
 
