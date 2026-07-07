@@ -35,21 +35,6 @@ HyperStrike 8K（HyperStrike Hub）の各設定項目の最適値を提案する
 うまく起動しない場合は `start_debug.bat`（エラーが画面に残るデバッグ起動）を使ってください。
 GPUが使われない場合は `fix_gpu.bat` を実行してください。
 
-## EXEのビルド（任意）
-
-`build_exe_portable.bat` をダブルクリックすると `dist\HyperStrike8K-Optimizer.exe`
-（コンソール非表示・Python不要）が生成されます。
-PyInstaller製EXEはウイルス対策ソフトに誤検知されることがあります。
-心配な場合はこのリポジトリのソースから自分でビルドしてください。
-
-## Apex特化モデル（任意・推奨）
-
-`update_model_apex.bat` を実行すると、コミュニティ公開のApex学習済みモデル
-（敵/味方識別付き）を取得・変換して導入します。
-**モデルの重みはこのリポジトリに含まれません**（ライセンス上の理由）。
-各自の環境で取得してください。自分のプレイ画像で追加学習する手順は
-[docs/TRAINING.md](docs/TRAINING.md) を参照。
-
 ## 主なファイル
 
 | ファイル | 役割 |
@@ -57,10 +42,9 @@ PyInstaller製EXEはウイルス対策ソフトに誤検知されることがあ
 | `app.py` | ローカルサーバー本体（キャプチャ・入力記録・API） |
 | `analyzer.py` | 解析エンジン（メトリクス・提案・GPU推論） |
 | `static/index.html` | ブラウザUI |
-| `prep_dataset.py` / `train_s29.bat` | カスタムモデル学習パイプライン |
+| `prep_dataset.py`  | カスタムモデル学習パイプライン |
 | `setup_portable.bat` / `start_portable.bat` | セットアップ / 起動 |
-| `build_exe_portable.bat` | EXEビルド |
-| `fix_gpu.bat` / `start_debug.bat` | トラブルシューティング |
+| `fix_gpu.bat` | トラブルシューティング |
 
 ## プライバシー
 
