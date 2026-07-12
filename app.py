@@ -42,7 +42,12 @@ import uvicorn
 
 import analyzer
 
-UI_VERSION = "v3.5"
+UI_VERSION = "v4.8"
+
+FRAME_CAP = 600          # 記録フレーム上限（JPEG圧縮保持なので600枚でも約200MB）
+CAP_FAST_SEC = 0.15      # ADS/射撃中のキャプチャ間隔（Vision時系列ペアを増やし信頼度向上）
+CAP_SLOW_SEC = 0.6       # 通常時のキャプチャ間隔
+CAP_SLOW_LATE = 1.5      # バッファ6割消費後の通常間隔（エイム時用に枠を温存）
 
 
 def resource_path(rel: str) -> str:
@@ -126,8 +131,6 @@ state = {
                  "ads":  {"type": "axis", "index": 4}},  # 既定: L2トリガー
     "lastPoll": 0.0,           # UIからの最終ポーリング時刻
     "goodbyeAt": 0.0,          # タブが閉じられた通知の時刻
-    "datasetCapture": False,   # 学習用データセット収集モード
-    "datasetCount": 0,
     "current": json.loads(json.dumps(analyzer.DEFAULT_CURRENT)),
     "status": "待機中",
     "screenMotion": 0.0,
@@ -152,6 +155,28 @@ def _begin_recording(auto: bool):
         state["status"] = ("プレイ検知 → 自動記録中" if auto else "記録中（Apexをプレイしてください）")
 
 
+def _load_prev_analysis():
+    """直近の解析ログを読み込む（RC暴走防止：前回推奨との比較に使用）"""
+    try:
+        import glob
+        base = os.path.dirname(os.path.abspath(sys.argv[0]))
+        logs = sorted(glob.glob(os.path.join(base, "logs", "analysis_*.json")))
+        if logs:
+            with open(logs[-1], encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[警告] 前回解析ログの読込に失敗: {e}")
+    return None
+
+
+def _frame_img(fr):
+    """キャプチャフレーム（JPEG圧縮 or 生配列）をBGR画像に復元する"""
+    if "img" in fr:
+        return fr["img"]
+    import cv2
+    return cv2.imdecode(np.frombuffer(fr["jpg"], dtype=np.uint8), cv2.IMREAD_COLOR)
+
+
 def _run_analysis():
     with lock:
         state["recording"] = False
@@ -159,36 +184,70 @@ def _run_analysis():
         samples = list(state["samples"])
         frames = list(state["frames"])
         current = state["current"]
+    # ---- APEX profile.cfg 自動同期（感度・応答曲線・スコープ倍率のground truth） ----
+    cfg_note = None
+    try:
+        cfgd = analyzer.read_apex_profile_cfg()
+        if cfgd:
+            current = json.loads(json.dumps(current))
+            current.setdefault("apex", {}).update(cfgd)
+            cfg_note = ("APEX設定自動同期: profile.cfgから "
+                        + ", ".join(f"{k}={v}" for k, v in cfgd.items()
+                                    if k != "optics")
+                        + ("、スコープ倍率" if "optics" in cfgd else "")
+                        + " を反映（ゲーム内実設定を優先）")
+            print(f"[HyperStrike Local] {cfg_note}")
+    except Exception as e:
+        print(f"[警告] profile.cfg同期に失敗: {e}")
+
     # ---- 武器の自動認識（右下HUDの武器名をWindows標準OCRで読取り） ----
     weapon_note = None
     slot_note = None
+    ocr_texts = []
+    weapon_stats = None    # マルチ武器: 射撃時間内訳と武器別リコイル指標
     _auto_weapon = current.get("apex", {}).get("weapon") == "自動認識"
     _auto_barrel = current.get("apex", {}).get("barrel") == "自動認識"
     if _auto_weapon or _auto_barrel:
         with lock:
             state["progress"] = {"phase": "武器自動認識 (OCR)", "done": 0, "total": 1}
         detected, votes = None, {}
+        weapon_timeline = []          # [(t_ms, 武器)] マッチ中の武器切替を追跡
         try:
             if not _auto_weapon:
                 raise ImportError("weapon manual")
             import winocr
             import cv2
             texts = []
-            picks = frames[:: max(1, len(frames) // 8)][:8]
+            # 時間軸に沿って最大24フレームをOCRし「いつどの武器か」を記録
+            picks = frames[:: max(1, len(frames) // 24)][:24]
             for fr in picks:
-                img = fr["img"]
+                img = _frame_img(fr)
                 h, w = img.shape[:2]
-                # 右下HUD: 武器名/弾薬表示の領域（16:9基準・余裕を持って切出し）
-                crop = img[int(h * 0.86):int(h * 0.975), int(w * 0.72):int(w * 0.995)]
-                crop = cv2.resize(crop, None, fx=2.0, fy=2.0,
-                                  interpolation=cv2.INTER_CUBIC)
-                for lang in ("en", "ja"):
-                    try:
-                        r = winocr.recognize_cv2_sync(crop, lang)
-                        if r and r.get("text"):
-                            texts.append(r["text"])
-                    except Exception:
-                        continue
+                # 右下HUD: 武器名/弾薬表示の領域（余裕を持って切出し。
+                # アスペクト比16:10等でもHUDは右下アンカーなので比率指定で概ね追従）
+                crop = img[int(h * 0.85):int(h * 0.985), int(w * 0.70):int(w * 0.995)]
+                up = cv2.resize(crop, None, fx=3.0, fy=3.0,
+                                interpolation=cv2.INTER_CUBIC)
+                # 前処理バリエーション: 原色 + 白文字抽出の二値化（ゲームフォント対策）
+                gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY)
+                _, binimg = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
+                variants = [up, cv2.cvtColor(binimg, cv2.COLOR_GRAY2BGR)]
+                frame_weapon = None
+                for v in variants:
+                    for lang in ("en", "ja"):
+                        try:
+                            r = winocr.recognize_cv2_sync(v, lang)
+                            if r and r.get("text"):
+                                texts.append(r["text"])
+                                if frame_weapon is None:
+                                    frame_weapon = analyzer.match_weapon(r["text"])
+                        except Exception:
+                            continue
+                    if frame_weapon:      # このフレームは判定済み → 残り前処理を省略
+                        break
+                if frame_weapon:
+                    weapon_timeline.append((fr["t"], frame_weapon))
+            ocr_texts = sorted(set(t.strip() for t in texts if t.strip()))[:40]
             detected, votes = analyzer.detect_weapon_from_text(texts)
         except ImportError as _ie:
             if str(_ie) == "weapon manual":
@@ -205,7 +264,7 @@ def _run_analysis():
                 rarities = []
                 picks2 = frames[:: max(1, len(frames) // 6)][:6]
                 for fr in picks2:
-                    img = fr["img"]
+                    img = _frame_img(fr)
                     h, w = img.shape[:2]
                     # 武器名の上段にあるアタッチメントスロット列（右下HUD）
                     band = img[int(h * 0.825):int(h * 0.862), int(w * 0.80):int(w * 0.985)]
@@ -238,17 +297,56 @@ def _run_analysis():
             if slot_note:
                 print(f"[HyperStrike Local] {slot_note}")
 
-        if _auto_weapon and detected:
-            current = json.loads(json.dumps(current))
-            current["apex"]["weapon"] = detected
-            total = sum(votes.values())
-            weapon_note = (f"武器自動認識: 「{detected}」({votes[detected]}/{total}票)"
-                           + (f"。他候補: " + ", ".join(f"{k}({v})" for k, v in votes.items()
-                              if k != detected) if len(votes) > 1 else ""))
-        elif _auto_weapon and weapon_note is None:
+        # ---- マルチ武器対応: 射撃バーストごとに使用武器を割当て（v4.6） ----
+        if _auto_weapon and weapon_timeline:
+            tl_votes = {}
+            for _, w in weapon_timeline:
+                tl_votes[w] = tl_votes.get(w, 0) + 1
+            weapon_stats = analyzer.weapon_firing_stats(
+                samples, analyzer.firing_intervals(samples), weapon_timeline)
+            dominant = weapon_stats.get("dominant")
+            # 支配的武器もOCR2フレーム以上の裏付けを要求（誤読1回での確定を防止）
+            if dominant and tl_votes.get(dominant, 0) < 2:
+                dominant = None
+            if dominant:
+                current = json.loads(json.dumps(current))
+                current["apex"]["weapon"] = dominant
+                parts = []
+                for w, st in sorted(weapon_stats["perWeapon"].items(),
+                                    key=lambda kv: -kv[1]["fireMs"]):
+                    seg = f"{w} {st['fireRatio']*100:.0f}%"
+                    if "holdJitter" in st:
+                        seg += f"(リコイル制御σ{st['holdJitter']:.2f})"
+                    parts.append(seg)
+                weapon_note = ("武器自動認識(マルチ): 射撃時間の内訳 "
+                               + " / ".join(parts)
+                               + f" → リコイル評価の代表武器「{dominant}」"
+                               f"（OCR{len(weapon_timeline)}フレームで追跡）")
+                detected = dominant
+            else:
+                # 射撃区間なし/射撃時の裏付け不足 → 全体多数決(2フレーム以上)へ
+                mj = max(tl_votes.items(), key=lambda kv: kv[1])
+                if mj[1] >= 2:
+                    detected = mj[0]
+                    current = json.loads(json.dumps(current))
+                    current["apex"]["weapon"] = detected
+                    weapon_note = (f"武器自動認識: 「{detected}」"
+                                   f"({mj[1]}/{len(weapon_timeline)}フレーム、"
+                                   f"射撃バーストとの対応付けは不成立)")
+                else:
+                    detected = None
+        if _auto_weapon and detected is None and weapon_note is None and votes:
+            best = max(votes.items(), key=lambda kv: kv[1])
+            weapon_note = (f"武器自動認識: 「{best[0]}」はOCR裏付け不足のため不採用 → "
+                           f"「なし/その他」で解析（誤読防止。手動選択も可能です）")
             current = json.loads(json.dumps(current))
             current["apex"]["weapon"] = "なし/その他"
-            weapon_note = "武器自動認識: HUDから武器名を読み取れず →「なし/その他」で解析"
+        elif _auto_weapon and detected is None and weapon_note is None:
+            current = json.loads(json.dumps(current))
+            current["apex"]["weapon"] = "なし/その他"
+            sample = " / ".join(ocr_texts[:3]) if ocr_texts else "（読取テキストなし）"
+            weapon_note = (f"武器自動認識: HUDから武器名を判定できず →「なし/その他」で解析"
+                           f"（OCR読取例: {sample}）")
         print(f"[HyperStrike Local] {weapon_note}")
 
     with lock:
@@ -256,8 +354,10 @@ def _run_analysis():
     stick_m = analyzer.analyze_stick_log(samples)
     frame_results = []
     for i, fr in enumerate(frames):
-        targets = engine.detect_persons(fr["img"])
-        frame_results.append({"t": fr["t"], "targets": targets})
+        targets, rejected = engine.detect_persons(_frame_img(fr),
+                                                  return_rejected=True)
+        frame_results.append({"t": fr["t"], "targets": targets,
+                              "rejected": rejected})
         with lock:
             state["progress"] = {"phase": f"AI画像解析 ({engine.active_provider})",
                                  "done": i + 1, "total": len(frames)}
@@ -270,9 +370,19 @@ def _run_analysis():
         saved = 0
         cls_names = {0: "Teammate", 1: "Enemy"}
         for fr, res in zip(frames, frame_results):
-            if not res["targets"] or saved >= 12:
+            if (not res["targets"] and not res.get("rejected")) or saved >= 12:
                 continue
-            img = fr["img"].copy()
+            img = _frame_img(fr).copy()
+            # 除外された検出はグレー枠+理由（フィルタの妥当性を目視確認できる）
+            for tg in res.get("rejected", []):
+                b = tg.get("box")
+                if not b:
+                    continue
+                cv2.rectangle(img, (b[0], b[1]), (b[0]+b[2], b[1]+b[3]),
+                              (128, 128, 128), 1)
+                cv2.putText(img, f"except: {tg.get('reject','?')} {tg['conf']:.2f}",
+                            (b[0], max(12, b[1]-6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (128, 128, 128), 1)
             for tg in res["targets"]:
                 b = tg.get("box")
                 if not b:
@@ -280,9 +390,12 @@ def _run_analysis():
                 is_enemy = (engine.num_classes == 2 and tg.get("cls") == 1) \
                            or engine.num_classes != 2
                 color = (60, 60, 230) if is_enemy else (230, 180, 60)  # BGR
+                if tg.get("bot"):
+                    color = (60, 200, 60)   # 訓練場Botモデルの検出は緑
                 cv2.rectangle(img, (b[0], b[1]), (b[0]+b[2], b[1]+b[3]), color, 2)
-                label = cls_names.get(tg.get("cls"), f"cls{tg.get('cls')}") \
-                        if engine.num_classes == 2 else "person"
+                label = "Bot" if tg.get("bot") else \
+                        (cls_names.get(tg.get("cls"), f"cls{tg.get('cls')}")
+                         if engine.num_classes == 2 else "person")
                 cv2.putText(img, f"{label} {tg['conf']:.2f}", (b[0], max(12, b[1]-6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             os.makedirs(det_dir, exist_ok=True)
@@ -296,8 +409,17 @@ def _run_analysis():
     with lock:
         state["progress"] = {"phase": "提案生成", "done": len(frames), "total": max(1, len(frames))}
     firing_iv = analyzer.firing_intervals(samples)
-    vision_m = analyzer.summarize_vision(frame_results, firing_iv)
-    rec, reasons, audit = analyzer.build_recommendation(current, stick_m, vision_m)
+    # 信頼できる検出 = IFFモデル、または訓練場Bot特化モデルが検出の主体(70%以上)
+    bot_hits = sum(1 for r in frame_results for t in r["targets"] if t.get("bot"))
+    all_hits = sum(len(r["targets"]) for r in frame_results)
+    trusted_model = (engine.num_classes == 2) or (all_hits > 0
+                                                  and bot_hits / all_hits >= 0.7)
+    vision_m = analyzer.summarize_vision(frame_results, firing_iv, samples=samples,
+                                         iff_model=trusted_model)
+    history = _load_prev_analysis()
+    rec, reasons, audit = analyzer.build_recommendation(current, stick_m, vision_m,
+                                                        history=history)
+    effects = analyzer.predict_effects(current, rec)
     if weapon_note:
         reasons.insert(0, weapon_note)
         audit.insert(0, {"rule": "_武器自動認識", "value": None, "threshold": "-",
@@ -307,6 +429,10 @@ def _run_analysis():
         audit.insert(1 if weapon_note else 0,
                      {"rule": "_アタッチメント自動認識", "value": None, "threshold": "-",
                       "fired": True, "action": slot_note})
+    if cfg_note:
+        reasons.insert(0, cfg_note)
+        audit.insert(0, {"rule": "_APEX設定同期", "value": None, "threshold": "-",
+                         "fired": True, "action": cfg_note})
     # 解析ログをファイル保存（アプリフォルダ/logs/）
     log_path = None
     try:
@@ -319,15 +445,21 @@ def _run_analysis():
             json.dump({
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "provider": engine.active_provider,
+                "model": getattr(engine, "model_name", "なし"),
                 "aiUsed": engine.session is not None,
                 "sampleCount": len(samples),
                 "frameCount": len(frames),
                 "enemyFrames": sum(1 for r in frame_results if r["targets"]),
+                "rejectedDetections": sum(len(r.get("rejected", []))
+                                          for r in frame_results),
                 "current": current,
                 "stickMetrics": stick_m,
                 "visionMetrics": vision_m,
+                "weaponStats": weapon_stats,
+                "ocrTexts": ocr_texts,
                 "audit": audit,
                 "recommendation": rec,
+                "effects": effects,
                 "reasons": reasons,
             }, f, ensure_ascii=False, indent=2)
         print(f"[HyperStrike Local] 解析ログ保存: {log_path}")
@@ -335,7 +467,7 @@ def _run_analysis():
         print(f"[警告] 解析ログ保存に失敗: {e}")
     with lock:
         state["result"] = {
-            "rec": rec, "reasons": reasons, "audit": audit,
+            "rec": rec, "reasons": reasons, "audit": audit, "effects": effects,
             "stickMetrics": stick_m, "visionMetrics": vision_m,
             "aiUsed": engine.session is not None,
             "provider": engine.active_provider,
@@ -411,9 +543,11 @@ def capture_loop():
     if mss is None:
         return
     prev_small = None
-    with getattr(mss, "MSS", mss.mss)() as sct:
-        t0 = None
-        while True:
+    t0 = None
+    while True:                       # 外側: mssコンテキストの再生成ループ
+      try:                            # BitBlt失敗(画面モード変更/スリープ/ロック)で
+        with getattr(mss, "MSS", mss.mss)() as sct:   # スレッドごと死なないよう保護
+          while True:
             idx = state["monitorIndex"]
             if idx >= len(sct.monitors):
                 idx = 1
@@ -421,27 +555,35 @@ def capture_loop():
             if state["recording"]:
                 if t0 is None or len(state["frames"]) == 0:
                     t0 = time.perf_counter()
-                if len(state["frames"]) < 120:
+                if len(state["frames"]) < FRAME_CAP:
                     shot = sct.grab(mon)
                     img = np.array(shot)[:, :, :3]
-                    with lock:
-                        state["frames"].append(
-                            {"t": (time.perf_counter() - t0) * 1000, "img": img})
-                    # データセット収集: 記録中は生フレームも dataset/raw に保存（最大1000枚）
-                    if state.get("datasetCapture") and state["datasetCount"] < 1000:
-                        try:
-                            import cv2
-                            base = os.path.dirname(os.path.abspath(sys.argv[0]))
-                            raw_dir = os.path.join(base, "dataset", "raw")
-                            os.makedirs(raw_dir, exist_ok=True)
-                            fn = time.strftime("%Y%m%d_%H%M%S_") \
-                                 + f"{state['datasetCount']:04d}.jpg"
-                            cv2.imwrite(os.path.join(raw_dir, fn), img,
-                                        [cv2.IMWRITE_JPEG_QUALITY, 92])
-                            state["datasetCount"] += 1
-                        except Exception:
-                            pass
-                time.sleep(0.5)
+                    # JPEG圧縮で保持（600枚でもメモリ圧を抑え、記録180秒超を全カバー）
+                    entry = {"t": (time.perf_counter() - t0) * 1000}
+                    try:
+                        import cv2
+                        ok, buf = cv2.imencode(".jpg", img,
+                                               [cv2.IMWRITE_JPEG_QUALITY, 90])
+                        if ok:
+                            entry["jpg"] = buf.tobytes()
+                        else:
+                            entry["img"] = img
+                    except ImportError:
+                        entry["img"] = img
+                    # 生フレーム保持(cv2不在)時は120枚まで（メモリ保護）
+                    if "img" in entry and len(state["frames"]) >= 120:
+                        entry = None
+                    if entry is not None:
+                        with lock:
+                            state["frames"].append(entry)
+                # ADS/射撃中は高頻度キャプチャ（エイム評価の時系列標本を確保）。
+                # 非エイム時はバッファ残量に応じて間引き、エイム用の枠を温存する
+                last = state["samples"][-1] if state["samples"] else None
+                engaged = bool(last and (last.get("rt", 0) > 0.5
+                                         or last.get("ad", 0) > 0.5))
+                slow = (CAP_SLOW_LATE if len(state["frames"]) > FRAME_CAP * 0.6
+                        else CAP_SLOW_SEC)
+                time.sleep(CAP_FAST_SEC if engaged else slow)
             else:
                 t0 = None
                 # 画面の動き量（縮小グレースケール差分）
@@ -452,6 +594,9 @@ def capture_loop():
                     state["screenMotion"] = float(np.abs(small - prev_small).mean())
                 prev_small = small
                 time.sleep(1.0)
+      except Exception as e:
+        print(f"[警告] 画面キャプチャに失敗（{e}）。2秒後に再試行します")
+        time.sleep(2.0)
 
 
 def auto_loop():
@@ -536,13 +681,6 @@ def reset_settings():
     return {"ok": True}
 
 
-@app.post("/api/dataset")
-async def dataset_toggle(payload: dict):
-    with lock:
-        state["datasetCapture"] = bool(payload.get("enabled"))
-    return {"ok": True, "count": state["datasetCount"]}
-
-
 @app.post("/api/arm")
 async def set_arm(payload: dict):
     with lock:
@@ -574,9 +712,7 @@ def status():
             "stickActive": round(state["stickActive"], 2),
             "resultSeq": state["resultSeq"],
             "progress": state["progress"],
-            "datasetCapture": state["datasetCapture"],
             "bindings": state["bindings"],
-            "datasetCount": state["datasetCount"],
             "recent": state["samples"][-200:],
         }
 

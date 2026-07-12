@@ -40,7 +40,7 @@
   <div>
     <div class="brand">HYPERSTRIKE 8K // LOCAL AI OPTIMIZER</div>
     <div class="sub">APEX LEGENDS — 完全ローカル解析
-      <span style="color:var(--green)">UI v3.5 / 公開向けセキュリティ対応</span></div>
+      <span style="color:var(--green)">UI v4.8 / 切り返し実測最適化（RC参照不要）・高密度計測</span></div>
   </div>
   <div style="text-align:right">
     <div id="gpu" style="color:var(--dim);font-size:11px">推論プロバイダ確認中…</div>
@@ -75,10 +75,18 @@
     <div class="row"><label>スティックサンプリング</label><select id="stickSampling"></select></div>
     <div class="row"><label>スティック量子化 (X360)</label><select id="quantization"></select></div>
     <div class="row"><label>高度サンプリングレベル</label><select id="advSampling"></select></div>
+    <div class="row"><label>RCフィルター (RC2.0) を使用</label>
+      <select id="useRcFilter"><option>OFF（推奨・BAN対策）</option><option>ON</option></select></div>
+    <div id="rcWarn" style="display:none;font-size:11px;color:var(--red);margin:2px 0 8px">
+      ⚠ ApexではRCフィルターが検出・処分の対象です。ONは自己責任でご使用ください。</div>
 
     <div class="cat">APEXゲーム内設定</div>
     <div class="row"><label>視点感度 (1-8)</label><select id="apex_lookSens"></select></div>
     <div class="row"><label>ADS感度 (1-8)</label><select id="apex_adsSens"></select></div>
+    <div class="row"><label>応答曲線（自動同期対象）</label><select id="apex_lookCurve">
+      <option value="0">クラシック</option><option value="1">安定</option>
+      <option value="2">微調整</option><option value="3">高速</option>
+      <option value="4">リニア</option></select></div>
     <div class="row"><label>使用武器（リコイル補正）</label><select id="apex_weapon"></select></div>
     <div class="row"><label>バレルスタビライザー</label><select id="apex_barrel"></select></div>
     <div class="row"><label>詳細スコープ感度</label><select id="apex_perOptic"><option>オフ</option><option>オン</option></select></div>
@@ -116,9 +124,6 @@
       <select id="bindFireSel" style="width:280px"></select></div>
     <div class="row"><label>ADSボタン</label>
       <select id="bindAdsSel" style="width:280px"></select></div>
-    <div class="row"><label>学習用データセット収集</label>
-      <select id="dsCapture"><option>OFF</option><option>ON</option></select>
-      <span id="dsCount" style="color:var(--dim);font-size:11px"></span></div>
     <div id="progWrap" style="display:none;margin:10px 0">
       <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-bottom:4px">
         <span id="progPhase"></span><span id="progText"></span>
@@ -141,7 +146,8 @@
     <button id="btnCopy" style="margin-top:10px">推奨JSONをコピー</button>
     <button id="btnExportHub" style="margin-top:10px">HYPERSTRIKE用プロファイルを書出</button>
     <p style="color:var(--dim);font-size:11px;margin-top:6px">
-      ※ Hub形式(.json)で書出します。事前にHubのバックアップを読込済みの場合はボタンマッピング等も引き継がれます。
+      ※ 書出には<b>事前にHubバックアップの読込が必須</b>です（Hubの復元は完全な形式のみ受け付けるため、
+      読み込んだ実機バックアップをベースに解析結果を上書きします。ボタンマッピング等はそのまま保持）。
       HyperStrike Hubの「設定のバックアップ」→ 復元から取り込んでください。</p>
   </div>
 </div>
@@ -338,9 +344,11 @@ function collect(){
     stickSampling:document.getElementById("stickSampling").value,
     quantization:document.getElementById("quantization").value,
     advSampling:document.getElementById("advSampling").value,
+    useRcFilter:document.getElementById("useRcFilter").value.startsWith("ON"),
     apex:{
       lookSens:+document.getElementById("apex_lookSens").value,
       adsSens:+document.getElementById("apex_adsSens").value,
+      lookCurve:+document.getElementById("apex_lookCurve").value,
       weapon:document.getElementById("apex_weapon").value,
       barrel:document.getElementById("apex_barrel").value,
       perOptic:document.getElementById("apex_perOptic").value==="オン",
@@ -390,9 +398,8 @@ function setupBindSelects(){
   document.getElementById("bindFireSel").addEventListener("change",push);
   document.getElementById("bindAdsSel").addEventListener("change",push);
 }
-document.getElementById("dsCapture").addEventListener("change",async e=>{
-  await fetch("/api/dataset",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({enabled:e.target.value==="ON"})});
+document.getElementById("useRcFilter").addEventListener("change",e=>{
+  document.getElementById("rcWarn").style.display=e.target.value.startsWith("ON")?"":"none";
 });
 document.getElementById("btnArm").onclick=async()=>{
   armed=!armed;
@@ -413,10 +420,11 @@ document.getElementById("btnStop").onclick=async()=>{
 };
 const PRESET_TO_INDEX={"デフォルト":0,"クイック":1,"精密":2,"安定":3,"デジタル":4,"ダイナミック":5,"カスタム":255};
 function buildHubProfile(rec){
-  // 読込済みHubプロファイルがあればそれをベースに（mapping/calibration等を保持）
-  const base=window._lastHubProfile
-    ? JSON.parse(JSON.stringify(window._lastHubProfile))
-    : {schemaVersion:15, appVersion:"2.0.0", mapping:{}, tuning:{}, calibration:{}};
+  // Hubの復元は厳格なスキーマ検証を行うため、実機からエクスポートした
+  // バックアップ(device/mapping/tuning全34項目を含む)をベースに、
+  // 解析対象のキーだけを上書きする。ベース無しでの生成は不完全になるため禁止。
+  if(!window._lastHubProfile) return null;
+  const base=JSON.parse(JSON.stringify(window._lastHubProfile));
   base.exportedAt=new Date().toISOString();
   const t=base.tuning=base.tuning||{};
   const side=(p,suf)=>{
@@ -437,16 +445,24 @@ function buildHubProfile(rec){
   };
   side("ls","Left"); side("rs","Right");
   const adv={"オフ":0,"14bit":1,"15bit":2,"16bit":3}[rec.advSampling];
-  if(adv!==undefined) t.adcOversampleMode=adv;
+  if(adv!==undefined&&"adcOversampleMode" in t) t.adcOversampleMode=adv;
   const q={"無制限":12,"11bit":11,"10bit":10,"9bit":9,"8bit":8}[rec.quantization];
-  if(q!==undefined) t.xinputStickBits=q;
+  if(q!==undefined&&"xinputStickBits" in t) t.xinputStickBits=q;
   const samp={"Extreme":0,"Excellent":1,"Good":2,"Robust":3}[rec.stickSampling];
-  if(samp!==undefined&&t.adcSamplingPresetId!==4) t.adcSamplingPresetId=samp;  // カスタムADCは温存
+  if(samp!==undefined&&"adcSamplingPresetId" in t&&t.adcSamplingPresetId!==4)
+    t.adcSamplingPresetId=samp;  // カスタムADC(4)は温存
   return base;
 }
 document.getElementById("btnExportHub").onclick=()=>{
   if(!window._lastRec){alert("先に解析を実行してください");return;}
   const prof=buildHubProfile(window._lastRec);
+  if(!prof){
+    alert("先にHyperStrike Hubの「設定のバックアップ」でエクスポートしたJSONを\n"+
+          "パネル01の「プロファイルJSON」から読み込んでください。\n"+
+          "（Hubの復元はdevice/mapping等を含む完全なファイルのみ受け付けるため、\n"+
+          "実機バックアップをベースに解析結果を上書きする方式にしています）");
+    return;
+  }
   const blob=new Blob([JSON.stringify(prof,null,2)],{type:"application/json"});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(blob);
@@ -480,8 +496,6 @@ async function poll(){
     document.getElementById("status").textContent=r.status;
     document.getElementById("stickActive").textContent=Math.round((r.stickActive||0)*100)+"%";
     document.getElementById("screenMotion").textContent=r.screenMotion??0;
-    document.getElementById("dsCount").textContent=
-      r.datasetCapture?`収集中: ${r.datasetCount}枚 (dataset\\raw)`:(r.datasetCount?`${r.datasetCount}枚収集済み`:"");
     document.getElementById("gpu").innerHTML=
       (r.gpu?'<span style="color:var(--green)">● GPU</span> ':'<span style="color:var(--red)">● CPU</span> ')+r.provider+
       ' ／ モデル: '+(r.model||'なし')+(r.model==='apex.onnx'?' <span style="color:var(--green)">(Apex特化/敵のみ検出)</span>':'');
@@ -539,8 +553,19 @@ function showResult(res){
      <td style="padding:2px 8px;color:var(--dim)">${a.threshold}</td>
      <td style="padding:2px 8px;color:${a.fired?"var(--green)":"var(--dim)"}">${a.fired?"発動":"×"}</td>
      <td style="padding:2px 8px">${a.action}</td></tr>`).join("");
+  const vm=res.visionMetrics||null;
+  const vmLine=vm?`<p style="font-size:11px;color:${(vm.confidence||0)>=0.25?"var(--green)":"var(--dim)"}">
+    Vision信頼度: ${(vm.confidence??0).toFixed(2)}（標本${vm.usedFrames??vm.frames}フレーム /
+    モード=${vm.mode==="ads"?"ADS中のみ":"全フレーム"}${vm.convergenceRatio!=null?" / 収束率"+(vm.convergenceRatio*100).toFixed(0)+"%":""}）
+    ${(vm.confidence||0)<0.25?"— 信頼度不足のためVision指標は設定変更に未使用":""}</p>`
+    :`<p style="font-size:11px;color:var(--dim)">Vision: 敵検出フレーム不足（入力ログのみで判定）</p>`;
+  const effHtml=(res.effects&&res.effects.length)?
+    `<div class="cat" style="margin-top:14px">予測されるゲーム内効果（設定→APEX反映モデル）</div>`+
+    res.effects.map(e=>`<p class="reason" style="color:var(--cyan)">◆ ${e}</p>`).join(""):"";
   document.getElementById("reasons").innerHTML=
+    vmLine+
     (res.reasons||[]).map(r=>`<p class="reason">▸ ${r}</p>`).join("")+
+    effHtml+
     `<div class="cat" style="margin-top:14px">判定監査（実測値 vs しきい値）</div>
      <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11px;width:100%">
      <tr style="color:var(--cyan)"><td style="padding:2px 8px">判定項目</td><td style="padding:2px 8px">実測値</td>
@@ -812,7 +837,7 @@ let _saveTimer=null, _restoring=false;
 document.addEventListener("change",e=>{
   if(_restoring) return;
   const id=e.target.id||"";
-  if(id==="monitorSel"||id==="dsCapture"||id.startsWith("bind")||id==="profileFile") return;
+  if(id==="monitorSel"||id.startsWith("bind")||id==="profileFile") return;
   clearTimeout(_saveTimer);
   _saveTimer=setTimeout(pushCurrent, 800);
 });
@@ -827,9 +852,13 @@ async function restoreSettings(){
       const a=s.current.apex||{};
       if(a.weapon!==undefined) setVal("apex_weapon",a.weapon);
       if(a.barrel!==undefined) setVal("apex_barrel",a.barrel);
+      if(a.lookCurve!==undefined) setVal("apex_lookCurve",String(a.lookCurve));
       if(a.perOptic!==undefined){setVal("apex_perOptic",a.perOptic?"オン":"オフ");
         document.getElementById("apex_opticsWrap").style.display=a.perOptic?"":"none";}
       if(a.optics) OPTIC_KEYS.forEach(k=>{if(a.optics[k]!==undefined)setVal(`apex_optic_${k}`,a.optics[k]);});
+      const rcOn=s.current.useRcFilter===true;
+      setVal("useRcFilter", rcOn?"ON":"OFF（推奨・BAN対策）");
+      document.getElementById("rcWarn").style.display=rcOn?"":"none";
       document.getElementById("importMsg").style.color="var(--dim)";
       document.getElementById("importMsg").textContent="前回の設定を復元しました";
       document.getElementById("importDetail").style.display="none";

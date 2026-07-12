@@ -10,7 +10,8 @@ HyperStrike 8K（HyperStrike Hub）の各設定項目の最適値を提案する
 - 武器（HUDのOCR）とアタッチメント（スロット色）の自動認識によるリコイル補正
 - APEXゲーム内感度（視点/ADS/詳細スコープ）を組み込んだ提案
 - HyperStrike Hubのバックアップ(.json)の**読込**と、解析結果を反映した**プロファイル書出**
-- シーズン対応カスタムモデルの学習パイプライン同梱（[docs/TRAINING.md](docs/TRAINING.md)）
+- 外部レコーダー（フルマッチの動画＋120Hz入力ログ）の**取り込み解析**にも対応
+  （`analyze_recording.bat` に録画フォルダをドラッグ）
 
 > **本ツールはオフライン解析専用です。** ゲームのメモリへのアクセス、入力の注入・自動化は
 > 一切行いません。記録済みのプレイを事後解析して設定値を提案するだけのツールです。
@@ -32,6 +33,15 @@ HyperStrike 8K（HyperStrike Hub）の各設定項目の最適値を提案する
 4. 画面の指示に従って: HyperStrike Hubのバックアップを読込 → モニターと射撃ボタンを選択 →
    計測（訓練場か実戦を2〜5分）→ 解析 → 提案されたプロファイルを書出してHubで復元
 
+うまく起動しない場合は `start_debug.bat`（エラーが画面に残るデバッグ起動）を使ってください。
+GPUが使われない場合は `fix_gpu.bat` を実行してください。
+
+## Apex特化モデル（任意・推奨）
+
+`update_model_apex.bat` を実行すると、コミュニティ公開のApex学習済みモデル
+（敵/味方識別付き）を取得・導入します。
+**モデルの重みはこのリポジトリに含まれません**（ライセンス上の理由）。
+各自の環境で取得してください。未導入の場合は汎用の人物検出モデルで動作します。
 
 ## 主なファイル
 
@@ -40,8 +50,10 @@ HyperStrike 8K（HyperStrike Hub）の各設定項目の最適値を提案する
 | `app.py` | ローカルサーバー本体（キャプチャ・入力記録・API） |
 | `analyzer.py` | 解析エンジン（メトリクス・提案・GPU推論） |
 | `static/index.html` | ブラウザUI |
-| `prep_dataset.py`  | カスタムモデル学習パイプライン |
+| `ingest_recording.py` / `analyze_recording.bat` | 外部録画（動画＋入力ログ）の取り込み解析 |
 | `setup_portable.bat` / `start_portable.bat` | セットアップ / 起動 |
+| `update_model_apex.bat` | Apex特化モデルの取得 |
+| `fix_gpu.bat` / `start_debug.bat` | トラブルシューティング |
 
 ## プライバシー
 
@@ -56,5 +68,3 @@ HyperStrike 8K（HyperStrike Hub）の各設定項目の最適値を提案する
 
 - Apex Legends は Electronic Arts Inc. / Respawn Entertainment の商標です。
   本ツールは非公式であり、EA/Respawnとは無関係です。
-- 学習用データセット（ゲームのスクリーンショット）は各自のローカルでのみ利用し、
-  再配布しないでください。
