@@ -42,7 +42,7 @@ import uvicorn
 
 import analyzer
 
-UI_VERSION = "v4.8"
+UI_VERSION = "v5.0"
 
 FRAME_CAP = 600          # 記録フレーム上限（JPEG圧縮保持なので600枚でも約200MB）
 CAP_FAST_SEC = 0.15      # ADS/射撃中のキャプチャ間隔（Vision時系列ペアを増やし信頼度向上）
@@ -399,8 +399,12 @@ def _run_analysis():
                 cv2.putText(img, f"{label} {tg['conf']:.2f}", (b[0], max(12, b[1]-6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             os.makedirs(det_dir, exist_ok=True)
-            cv2.imwrite(os.path.join(det_dir, f"t{int(fr['t'])}ms.jpg"), img)
-            saved += 1
+            # cv2.imwriteは日本語等の非ASCIIパスに書き込めないため
+            # imencode+tofileで保存（フォルダ名に依存しない）
+            ok2, buf2 = cv2.imencode(".jpg", img)
+            if ok2:
+                buf2.tofile(os.path.join(det_dir, f"t{int(fr['t'])}ms.jpg"))
+                saved += 1
         if saved:
             print(f"[HyperStrike Local] 検出プレビュー {saved}枚保存: {det_dir}")
     except Exception as e:

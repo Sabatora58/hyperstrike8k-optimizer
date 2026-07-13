@@ -747,6 +747,17 @@ def _axis_metrics(samples, kx, ky, exclude=None):
         for i in range(6, -1, -1):
             if mag_quantiles[i] >= mag_quantiles[i + 1]:
                 mag_quantiles[i] = mag_quantiles[i + 1] - 15
+    # 分布ヒストグラム（v5.0: 最適ノット配置/RC段k-meansの入力。分位点8点より高情報）
+    mag_hist = None
+    if len(mags) >= 200:
+        mag_hist = [0] * 40
+        for mg in mags:
+            mag_hist[min(39, int(mg * 40))] += 1
+    speed_hist = None
+    if len(speeds) >= 100:
+        speed_hist = [0] * 32
+        for v in speeds:
+            speed_hist[min(31, v * 32 // 256)] += 1
     # 切り返し統計（中央値と頻度/分）
     rev_transit_ms = None
     rev_per_min = 0.0
@@ -771,6 +782,8 @@ def _axis_metrics(samples, kx, ky, exclude=None):
         "bandReversal": [band_rev[b] / band_n[b] if band_n[b] else 0.0 for b in range(5)],
         "speedQuantiles": quantiles,
         "magQuantiles": mag_quantiles,
+        "magHist": mag_hist,       # 倒し量分布40bin（エイム時のみ）
+        "speedHist": speed_hist,   # 正規化速度分布32bin(0-255を8刻み)
     }
 
 
@@ -807,7 +820,10 @@ def summarize_vision(frame_results, firing_iv=None, samples=None, iff_model=True
     """frame_results: [{t, targets:[{devX,devY,conf}]}]
     改良版(v3.7):
     - ADS区間のフレームを優先使用（意図的に狙っている時間だけをエイム評価に使う）
-    - 時系列ペア(<600ms)で「収束(近づいている)」「行き過ぎ(左右符号反転)」を判定
+    - 時系列ペア(<900ms)で「収束(近づいている)」「行き過ぎ(左右符号反転)」を判定
+      （通常キャプチャ間隔0.6〜1.5sのフレームがペア成立できるよう900ms。
+       600msでは非射撃フレームが構造的に一度もペアにならず信頼度が
+       常に半減する不整合があった: v4.9修正）
     - サンプル数から confidence(0-1) を算出。少数フレームの偶然で
       設定変更が駆動されるのを防ぐ（呼び出し側でゲート）"""
     ads_iv = []
@@ -829,7 +845,7 @@ def summarize_vision(frame_results, firing_iv=None, samples=None, iff_model=True
         pair_n = conv_n = over_ev = 0
         for a, b in zip(use, use[1:]):
             dt = b["t"] - a["t"]
-            if dt <= 0 or dt > 600:
+            if dt <= 0 or dt > 900:
                 continue
             pair_n += 1
             d0 = math.hypot(a["devX"], a["devY"])
@@ -964,18 +980,57 @@ def _adjust_curve_outputs(points, mid_delta):
     return _adjust_curve_regions(points, 0, mid_delta, 0)
 
 
-def _optimize_rc_speeds(current_tiers, quantiles):
-    """実測スティック速度の分位点からRC速度段の境界を提案。
+def _optimize_rc_speeds(current_tiers, quantiles, speed_hist=None):
+    """RC速度段の境界を実測から最適化。
+    v5.0: speedHistがあれば重み付き1次元k-means(Lloyd法)で「各ティア内の
+    速度ばらつきが最小」になる境界を算出（各段は一定RC値を持つため、
+    段内分散最小＝RC割当ての量子化誤差最小）。ヒスト不足時は分位点法。
     最終段は255固定、昇順・最小間隔2を保証。変化が小さければNone"""
-    if not quantiles or len(current_tiers) != 5:
+    if len(current_tiers) != 5:
         return None
-    prop = []
-    prev = 0
-    for q in quantiles[:4]:
-        s = max(prev + 2, min(250, int(q)))
-        prop.append(s)
-        prev = s
-    prop.append(255)
+    prop = None
+    if speed_hist and sum(speed_hist) >= 100:
+        vals = [b * 8 + 4 for b in range(32)]         # ビン代表値(0-252)
+        init = list(quantiles[:4]) if quantiles else [32, 80, 128, 192]
+        centers = sorted(set(max(2, min(250, int(c))) for c in init))
+        centers.append(min(252, centers[-1] + 30))
+        while len(centers) < 5:
+            centers.append(min(252, centers[-1] + 20))
+        centers = centers[:5]
+        for _ in range(30):
+            bnd = [(centers[i] + centers[i + 1]) / 2.0 for i in range(4)]
+            new_c = []
+            for ci in range(5):
+                lo = bnd[ci - 1] if ci > 0 else -1.0
+                hi = bnd[ci] if ci < 4 else 1e9
+                s = wv = 0.0
+                for v, wt in zip(vals, speed_hist):
+                    if lo < v <= hi:
+                        s += v * wt
+                        wv += wt
+                new_c.append(s / wv if wv else centers[ci])
+            if all(abs(a - b) < 0.5 for a, b in zip(new_c, centers)):
+                centers = new_c
+                break
+            centers = sorted(new_c)
+        bnd = [(centers[i] + centers[i + 1]) / 2.0 for i in range(4)]
+        prop = []
+        prev = 0
+        for b in bnd:
+            s = max(prev + 2, min(250, int(round(b))))
+            prop.append(s)
+            prev = s
+        prop.append(255)
+    elif quantiles:
+        prop = []
+        prev = 0
+        for q in quantiles[:4]:
+            s = max(prev + 2, min(250, int(q)))
+            prop.append(s)
+            prev = s
+        prop.append(255)
+    if prop is None:
+        return None
     cur = [t["speed"] for t in current_tiers]
     if max(abs(a - b) for a, b in zip(prop, cur)) < 8:
         return None   # 現状と大差なし
@@ -1218,6 +1273,118 @@ def _apply_rc_guards(old_tiers, new_tiers, prev_rec_tiers, metric_improved):
     return out, notes
 
 
+# ------------------------------------------------------------
+# 最適ノット配置エンジン（v5.0）
+# 区分線形近似の理論: ノットは「使用密度 × 目標カーブの曲率」の重みに
+# 比例して配置すると近似誤差が最小化される。計測ヒストグラムを直接使用。
+# ------------------------------------------------------------
+def _target_curve_grid(points, low_d, mid_d, high_d, step=5):
+    """旧カーブ+領域デルタ（連続エンベロープ）の目標カーブをグリッドで返す"""
+    xs = list(range(0, 1001, step))
+    ys = []
+    for x in xs:
+        base = _curve_value(points, x)
+        d = 0.0
+        if x < 333:
+            d += low_d * math.sin(math.pi * x / 333.0)
+        if 250 <= x <= 750:
+            d += mid_d * math.sin(math.pi * (x - 250) / 500.0)
+        if x > 667:
+            d += high_d * math.sin(math.pi * (x - 667) / 333.0)
+        ys.append(max(0.0, min(1000.0, base + d)))
+    for i in range(1, len(ys)):                 # 単調化
+        if ys[i] < ys[i - 1]:
+            ys[i] = ys[i - 1]
+    return xs, ys
+
+
+def optimal_curve_inputs(xs, ys, mag_hist, fallback_ins, min_gap=25):
+    """使用密度(magHist)×目標曲率で8ノットを最適配置。ヒスト不足時はfallback"""
+    if not mag_hist or sum(mag_hist) < 50:
+        return list(fallback_ins)
+    n = len(xs)
+    total = float(sum(mag_hist))
+    dens = []
+    for x in xs:
+        b = min(39, x * 40 // 1000)
+        dens.append(mag_hist[b] / total)
+    mean_d = sum(dens) / n
+    # キャップ+床: 極端に尖った使用分布でも全域カバーを失わないようにする
+    dens = [min(d, 3.0 * mean_d) + 0.30 * mean_d for d in dens]
+    curv = [0.0] * n
+    for i in range(2, n - 2):
+        curv[i] = abs(ys[i + 2] - 2 * ys[i] + ys[i - 2])
+    mean_c = (sum(curv) / n) or 1.0
+    w = [dens[i] * (curv[i] + 0.35 * mean_c) for i in range(n)]
+    cum = [0.0]
+    for v in w:
+        cum.append(cum[-1] + v)
+    tot = cum[-1] or 1.0
+    ins = []
+    j = 0
+    for k in range(1, 9):
+        tgt = tot * k / 9.0
+        while j < n and cum[j + 1] < tgt:
+            j += 1
+        ins.append(xs[min(n - 1, j)])
+    ins[0] = max(20, min(ins[0], 300))           # P1は必ず低域に
+    # 全域カバー保証: 端点(1000)側を含む各区間の最大幅を280に制限
+    if 1000 - ins[-1] > 280:
+        ins[-1] = 1000 - 280
+    for i in range(6, -1, -1):
+        if ins[i + 1] - ins[i] > 280:
+            ins[i] = ins[i + 1] - 280
+    for i in range(1, 8):
+        if ins[i] < ins[i - 1] + min_gap:
+            ins[i] = ins[i - 1] + min_gap
+    if ins[-1] > 980:
+        ins[-1] = 980
+        for i in range(6, -1, -1):
+            if ins[i] >= ins[i + 1]:
+                ins[i] = ins[i + 1] - min_gap
+    return ins
+
+
+LEFT_UNIFORM_INS = [111, 222, 333, 444, 556, 667, 778, 889]   # P1-P8均等基準
+
+
+def optimize_left_curve_points(points, mag_q, low_delta, high_delta):
+    """左スティック専用: P1〜P8を全域にバランス配置する（v4.9）。
+    各点は均等基準±70の帯内で実測分位点へ寄せる。移動スティックは
+    歩き〜走り〜全力の全域に制御点が必要で、分位点直採用だと全倒し付近に
+    点が密集して低速域の粒度を失うため（実測: 8点中5点が920-980に集中）。
+    出力は旧カーブ形状の補間＋領域デルタ（低域=ジッター平坦化/高域=飽和対策）"""
+    ins = []
+    for i in range(8):
+        base = LEFT_UNIFORM_INS[i]
+        tgt = mag_q[i] if (mag_q and len(mag_q) == 8) else base
+        ins.append(int(max(base - 70, min(base + 70, tgt))))
+    for i in range(1, 8):                    # 単調増加・最小間隔40
+        if ins[i] < ins[i - 1] + 40:
+            ins[i] = ins[i - 1] + 40
+    if ins[-1] > 980:
+        ins[-1] = 980
+        for i in range(6, -1, -1):
+            if ins[i] >= ins[i + 1]:
+                ins[i] = ins[i + 1] - 40
+    outs = [int(round(_curve_value(points, x))) for x in ins]
+    for i in range(8):
+        if i < 3:
+            w = low_delta * math.sin(math.pi * (i + 1) / 6)      # P1-P3
+        elif i < 6:
+            w = 0.0                                              # P4-P6は形状維持
+        else:
+            w = high_delta * math.sin(math.pi * (i - 5) / 3)     # P7-P8
+        outs[i] = max(0, min(1000, int(round(outs[i] + w))))
+    for i in range(1, 8):
+        if outs[i] <= outs[i - 1]:
+            outs[i] = outs[i - 1] + 1
+    if outs[-1] > 1000:
+        over = outs[-1] - 1000
+        outs = [max(0, o - over) for o in outs]
+    return [{"in": min(999, ins[i]), "out": outs[i]} for i in range(8)]
+
+
 def build_recommendation(current, stick_m, vision_m, history=None):
     import copy
     rec = copy.deepcopy(current)
@@ -1387,7 +1554,7 @@ def build_recommendation(current, stick_m, vision_m, history=None):
             adv[4]["rc"] = _clamp_rc(old5 + 30)
             changed.append(f"P5: {old5}→{adv[4]['rc']}（スナップバック対策）")
         q = m.get("speedQuantiles")
-        new_speeds = _optimize_rc_speeds(adv, q)
+        new_speeds = _optimize_rc_speeds(adv, q, m.get("speedHist"))
         audit.append({"rule": "RC速度段最適化(右)", "value": None,
                       "threshold": "実測分位点との乖離>=8", "fired": bool(new_speeds),
                       "action": (f"{[t['speed'] for t in adv]}→{new_speeds}"
@@ -1469,7 +1636,27 @@ def build_recommendation(current, stick_m, vision_m, history=None):
                 reasons.append(f"右: RC無効のため初動不足(under={under:.2f})をカーブ低〜中域で補償"
                                f"（低域+{int(boost*0.5)}/中域+{boost}）")
         mq = m.get("magQuantiles")
-        newpts = optimize_curve_points(cur_rs["curvePoints"], mq, low_d, mid_d, high_d)
+        mh = m.get("magHist")
+        placement = "分位点"
+        if mh and sum(mh) >= 50:
+            # v5.0: 目標カーブ(旧形状+デルタ)の曲率×使用密度で最適ノット配置。
+            # 出力は目標カーブそのものをノット位置で標本化（デルタ込みで整合）
+            gx, gy = _target_curve_grid(cur_rs["curvePoints"], low_d, mid_d, high_d)
+            fb = [p["in"] for p in optimize_curve_points(
+                cur_rs["curvePoints"], mq, 0, 0, 0)]
+            ins = optimal_curve_inputs(gx, gy, mh, fb, min_gap=25)
+            outs = [int(round(gy[min(len(gy) - 1, x // 5)])) for x in ins]
+            for i in range(1, 8):
+                if outs[i] <= outs[i - 1]:
+                    outs[i] = outs[i - 1] + 1
+            if outs[-1] > 1000:
+                ov = outs[-1] - 1000
+                outs = [max(0, o - ov) for o in outs]
+            newpts = [{"in": min(999, ins[i]), "out": outs[i]} for i in range(8)]
+            placement = "最適配置(密度×曲率)"
+        else:
+            newpts = optimize_curve_points(cur_rs["curvePoints"], mq,
+                                           low_d, mid_d, high_d)
         # in=outの点はどこに置いてもリニア（感度不変）。リニア→リニアの座標移動は
         # 無意味な「変更風」表示になるだけなので抑止する（ユーザー指摘・v4.2）
         new_flat = max(abs(p["out"] - p["in"]) for p in newpts) < 12
@@ -1482,11 +1669,11 @@ def build_recommendation(current, stick_m, vision_m, history=None):
         if newpts != cur_rs["curvePoints"]:
             rs["curvePoints"] = newpts
             reasons.append(f"右: カスタムカーブを実測から再構成 — 入力座標を"
-                           f"{'実測倒し量の分位点'+str(mq) if mq else '現状維持'}へ、"
+                           f"{placement}{[p['in'] for p in newpts]}へ、"
                            f"出力を領域別調整(低域{low_d:+d}/中域{mid_d:+d}/高域{high_d:+d})")
         audit.append({"rule": "カーブ最適化(右)", "value": None, "threshold": "-",
                       "fired": newpts != cur_rs["curvePoints"],
-                      "action": (f"in={'実測' if mq else '維持'} low={low_d:+d} "
+                      "action": (f"in={placement} low={low_d:+d} "
                                  f"mid={mid_d:+d} high={high_d:+d}"
                                  + ("（リニア→リニアのため座標移動も抑止）"
                                     if (new_flat and cur_flat) else ""))})
@@ -1512,8 +1699,20 @@ def build_recommendation(current, stick_m, vision_m, history=None):
                            f"「{rec['stickSampling']}」へ（安定寄り）")
     if check("アンダーシュート(高度サンプリング)", under, ">", 0.30,
              "高度サンプリング14bit") and current.get("advSampling") == "オフ":
-        rec["advSampling"] = "14bit"
-        reasons.append("微調整の分解能不足の兆候 → 高度サンプリング「14bit」を提案")
+        # 高度サンプリング=ADCオーバーサンプリング。分解能が上がる代わりに
+        # 平均化で応答が僅かに鈍る（ローパス+微小レイテンシ）ため、
+        # 切り返しの多い操作スタイルには提案しない（ユーザー実感と物理の整合）
+        rpm = m.get("revPerMin", 0) or 0
+        if rpm >= 15:
+            reasons.append(f"微調整の分解能不足の兆候はありますが、切り返しが多い"
+                           f"スタイル({rpm:.0f}回/分)のため高度サンプリングは"
+                           f"「オフ」維持を推奨（オーバーサンプリングの平均化は"
+                           f"切り返し応答に不利）")
+        else:
+            rec["advSampling"] = "14bit"
+            reasons.append("微調整の分解能不足の兆候 → 高度サンプリング「14bit」を提案"
+                           "（注: 平均化で応答が僅かに滑らか/遅くなるトレードオフあり。"
+                           "切り返し重視ならオフ維持も妥当です）")
 
     # リコイル制御診断
     if m.get("firingSegmented") and m.get("recoilHoldJitter") is not None:
@@ -1566,7 +1765,7 @@ def build_recommendation(current, stick_m, vision_m, history=None):
             ladv[4]["rc"] = _clamp_rc(old5 + 30)
             l_changed.append(f"P5: {old5}→{ladv[4]['rc']}（スナップバック対策）")
         lq = lm.get("speedQuantiles")
-        l_speeds = _optimize_rc_speeds(ladv, lq)
+        l_speeds = _optimize_rc_speeds(ladv, lq, lm.get("speedHist"))
         audit.append({"rule": "RC速度段最適化(左)", "value": None,
                       "threshold": "実測分位点との乖離>=8", "fired": bool(l_speeds),
                       "action": (f"{[t['speed'] for t in ladv]}→{l_speeds}"
@@ -1585,7 +1784,8 @@ def build_recommendation(current, stick_m, vision_m, history=None):
                  if (l_band[0] > BAND_REV_FLOOR or lj > 0.15) else 0)
         l_high = int(max(0.0, lsat - 0.40) * 120)   # 飽和が多い→高域を持ち上げ最高速へ早く
         lmq = lm.get("magQuantiles")
-        l_pts = optimize_curve_points(cur_ls["curvePoints"], lmq, l_low, 0, l_high)
+        # P1〜P8を全域バランス配置（均等基準±70で実測へ寄せる）: v4.9
+        l_pts = optimize_left_curve_points(cur_ls["curvePoints"], lmq, l_low, l_high)
         # リニア→リニアの座標移動は感度不変で無意味なため抑止（右と同様）
         l_new_flat = max(abs(p["out"] - p["in"]) for p in l_pts) < 12
         l_cur_flat = max(abs(p["out"] - p["in"]) for p in cur_ls["curvePoints"]) < 12
@@ -1593,11 +1793,13 @@ def build_recommendation(current, stick_m, vision_m, history=None):
             l_pts = cur_ls["curvePoints"]
         if l_pts != cur_ls["curvePoints"]:
             ls["curvePoints"] = l_pts
-            reasons.append(f"左: カーブを実測から再構成（入力={'実測分位点' if lmq else '維持'}, "
+            reasons.append(f"左: カーブをP1〜P8バランス配置で再構成"
+                           f"（全域を均等カバーしつつ実測分布へ寄せ、"
                            f"低域{l_low:+d}/高域{l_high:+d} — 高域増は最高移動速度への到達短縮）")
         audit.append({"rule": "カーブ最適化(左)", "value": None, "threshold": "-",
                       "fired": l_pts != cur_ls["curvePoints"],
-                      "action": f"low={l_low:+d} high={l_high:+d}"
+                      "action": f"バランス配置 in={[p['in'] for p in l_pts]} "
+                                f"low={l_low:+d} high={l_high:+d}"
                                 + ("（リニア維持）" if (l_new_flat and l_cur_flat) else "")})
 
     reasons.extend(sens_recommendations(over, under, apex, ctx))
